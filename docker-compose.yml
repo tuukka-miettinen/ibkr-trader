@@ -1,0 +1,28 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER:-ibkr}
+      IBKR_HOST: ${IBKR_HOST:-host.docker.internal}
+      IBKR_PORT: ${IBKR_PORT:-4004}
+      IBKR_CLIENT_ID: ${IBKR_CLIENT_ID:-101}
+      IBKR_EXCHANGE: ${IBKR_EXCHANGE:-SMART}
+      IBKR_CURRENCY: ${IBKR_CURRENCY:-USD}
+      IBKR_USE_RTH: ${IBKR_USE_RTH:-false}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

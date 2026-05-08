@@ -1,0 +1,11 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "npm install": true,
+        "c:/Users/Tuukka/.PYENV/PYENV-WIN/versions/3.13.1/python.exe": true,
+        "npm run build": true,
+        "&": true,
+        "docker compose": true,
+        "New-Item": true,
+        "Out-Null": true
+    }
+}

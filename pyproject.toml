@@ -1,0 +1,24 @@
+[project]
+name = "trader"
+version = "0.1.0"
+description = "Trading platform foundation with FastAPI and a charting frontend"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0,<1.0.0",
+    "ib-insync>=0.9.86,<1.0.0",
+    "pydantic>=2.9.0,<3.0.0",
+    "uvicorn[standard]>=0.32.0,<1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.28.0,<1.0.0",
+    "pytest>=8.3.0,<9.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
