@@ -74,6 +74,49 @@ export default function BacktestChart({ priceData, trades, selectedDate }: Props
     });
     chartRef.current = chart;
 
+    // Collect trade timestamps that fall on this day so we can inject
+    // them into the price series.  lightweight-charts silently drops
+    // markers whose timestamp doesn't exist in the series data.
+    const tradePoints: Map<number, number> = new Map(); // ts → price
+    for (const trade of trades) {
+      for (const entry of trade.entries) {
+        if (entry.time.slice(0, 10) === selectedDate || tradingDate(entry.time) === selectedDate) {
+          tradePoints.set(toTs(entry.time) as number, entry.price);
+        }
+      }
+      if (trade.exit_time.slice(0, 10) === selectedDate || tradingDate(trade.exit_time) === selectedDate) {
+        tradePoints.set(toTs(trade.exit_time) as number, trade.exit_price);
+      }
+    }
+
+    // Build merged price + VWAP arrays, injecting trade-time points
+    const priceMap = new Map<number, { p: number; v: number }>();
+    for (const pt of priceData) {
+      priceMap.set(toTs(pt.t) as number, { p: pt.p, v: pt.v });
+    }
+
+    // Add trade points that are missing from the sampled series
+    for (const [ts, price] of tradePoints) {
+      if (!priceMap.has(ts)) {
+        // Find nearest VWAP value for interpolation
+        let nearestVwap = price;
+        let bestDist = Infinity;
+        for (const pt of priceData) {
+          const d = Math.abs((toTs(pt.t) as number) - ts);
+          if (d < bestDist) {
+            bestDist = d;
+            nearestVwap = pt.v;
+          }
+        }
+        priceMap.set(ts, { p: price, v: nearestVwap });
+      }
+    }
+
+    // Sort by time
+    const mergedTimes = [...priceMap.keys()].sort((a, b) => a - b);
+    const mergedPrice = mergedTimes.map((ts) => ({ time: ts as UTCTimestamp, value: priceMap.get(ts)!.p }));
+    const mergedVwap = mergedTimes.map((ts) => ({ time: ts as UTCTimestamp, value: priceMap.get(ts)!.v }));
+
     // Price line
     const priceSeries = chart.addLineSeries({
       color: "#38bdf8",
@@ -82,9 +125,7 @@ export default function BacktestChart({ priceData, trades, selectedDate }: Props
       lastValueVisible: false,
       title: "Price",
     });
-    priceSeries.setData(
-      priceData.map((p) => ({ time: toTs(p.t), value: p.p }))
-    );
+    priceSeries.setData(mergedPrice);
 
     // VWAP line
     const vwapSeries = chart.addLineSeries({
@@ -95,9 +136,7 @@ export default function BacktestChart({ priceData, trades, selectedDate }: Props
       lastValueVisible: false,
       title: "VWAP",
     });
-    vwapSeries.setData(
-      priceData.map((p) => ({ time: toTs(p.t), value: p.v }))
-    );
+    vwapSeries.setData(mergedVwap);
 
     // Buy / Sell markers on the price series
     const markers: Array<{

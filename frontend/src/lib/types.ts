@@ -155,3 +155,68 @@ export type OptimizationJobListItem = {
 };
 
 export type SocketMessage = SnapshotMessage | CandleUpdateMessage | StatusMessage | ErrorMessage;
+
+// ============================================================================
+// Live Paper-Trading Types
+// ============================================================================
+
+export type LiveSessionStatus = "created" | "running" | "stopped" | "error";
+
+export type LiveSession = {
+  id: string;
+  name: string;
+  status: LiveSessionStatus;
+  order_type: "market" | "limit";
+  position_size: number;
+  max_entries: number;
+  max_daily_loss: number;
+  error_message: string | null;
+  created_at: string | null;
+  started_at: string | null;
+  stopped_at: string | null;
+  is_running: boolean;
+};
+
+export type LiveSessionSymbol = {
+  id: string;
+  symbol: string;
+  algorithm_id: string;
+  allocated_capital: number;
+  position_size: number;
+  max_entries: number;
+  current_shares: number;
+  current_cost: number;
+  cash_remaining: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  daily_realized_pnl: number;
+  last_price: number | null;
+  portfolio_value?: number;
+  avg_price?: number;
+  tick_count?: number;
+  last_tick_time?: string | null;
+  position_entries?: { time: string; price: number; shares: number; cost: number }[];
+};
+
+export type LiveTrade = {
+  id: string;
+  symbol: string;
+  side: "buy" | "sell";
+  order_type: "market" | "limit";
+  shares: number;
+  price: number;
+  cost: number;
+  pnl: number | null;
+  pnl_pct: number | null;
+  ibkr_order_id: number | null;
+  status: "pending" | "filled" | "cancelled" | "error";
+  created_at: string | null;
+};
+
+export type LiveWsEvent =
+  | { type: "snapshot"; session_id: string; symbols: Record<string, LiveSessionSymbol>; total_pnl: number; total_value: number }
+  | { type: "tick"; symbol: string; time: string; price: number; volume: number; position_shares: number; unrealized_pnl: number; realized_pnl: number; cash: number; portfolio_value: number; tick_count: number }
+  | { type: "trade"; symbol: string; side: "buy" | "sell"; shares: number; price: number; cost?: number; proceeds?: number; pnl?: number; pnl_pct?: number; time: string; cash_remaining: number }
+  | { type: "status"; status: string; message: string; symbols?: string[] }
+  | { type: "error"; message: string; symbol?: string }
+  | { type: "heartbeat" };

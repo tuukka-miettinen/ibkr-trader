@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import CandlestickChart from "./components/CandlestickChart";
+import LiveTradingView from "./components/LiveTradingView";
 import TickBacktestView from "./components/TickBacktestView";
 import type { Candle, SocketMessage, Timeframe } from "./lib/types";
 
@@ -33,7 +34,7 @@ export default function App() {
   const [status, setStatus] = useState("Connecting");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<"live" | "tick-backtest">("live");
+  const [view, setView] = useState<"live" | "tick-backtest" | "paper-trading">("live");
   const socketRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -104,6 +105,7 @@ export default function App() {
       <div className="tab-bar">
         <button type="button" className={`tab${view === "live" ? " active" : ""}`} onClick={() => setView("live")}>Live chart</button>
         <button type="button" className={`tab${view === "tick-backtest" ? " active" : ""}`} onClick={() => setView("tick-backtest")}>Tick Backtest</button>
+        <button type="button" className={`tab${view === "paper-trading" ? " active" : ""}`} onClick={() => setView("paper-trading")}>Paper Trading</button>
       </div>
 
       {view === "live" && (
@@ -140,6 +142,8 @@ export default function App() {
       )}
 
       {view === "tick-backtest" && <TickBacktestView />}
+
+      {view === "paper-trading" && <LiveTradingView />}
     </main>
   );
 }

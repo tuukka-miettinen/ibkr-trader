@@ -114,6 +114,7 @@ export default function TickBacktestView() {
     daily: DailySummary[];
     trades: TradeData[];
     price_series: Record<string, PricePoint[]>;
+    ticks_per_day?: Record<string, number>;
   } | null>(null);
 
   const [algorithms, setAlgorithms] = useState<Algorithm[]>([]);
@@ -485,11 +486,18 @@ export default function TickBacktestView() {
                   </tr>
                 </thead>
                 <tbody>
-                  {runResult.daily.map((day) => {
+                  {runResult.daily.map((day, dayIdx) => {
                     const hasTrades = day.num_trades > 0;
                     const hasUnrealized = (day.unrealized_pnl ?? 0) !== 0;
                     const hasPosition = (day.position_shares ?? 0) > 0;
                     const isSelected = chartDay === day.date;
+                    // Detect partial day: last day with significantly fewer ticks than the median
+                    const dayTicks = runResult.ticks_per_day?.[day.date] ?? 0;
+                    const allTickCounts = Object.values(runResult.ticks_per_day ?? {});
+                    const medianTicks = allTickCounts.length > 1
+                      ? [...allTickCounts].sort((a, b) => a - b)[Math.floor(allTickCounts.length / 2)]
+                      : dayTicks;
+                    const isPartial = dayIdx === runResult.daily.length - 1 && medianTicks > 0 && dayTicks < medianTicks * 0.5;
                     return (
                       <tr key={day.date} onClick={() => setChartDay(day.date)}
                         style={{
@@ -497,7 +505,10 @@ export default function TickBacktestView() {
                           background: isSelected ? "rgba(56, 189, 248, 0.1)" : undefined,
                           borderLeft: isSelected ? "2px solid #38bdf8" : "2px solid transparent",
                         }}>
-                        <td>{day.date}</td>
+                        <td>
+                          {day.date}
+                          {isPartial && <span style={{ color: "#f59e0b", fontSize: "0.7rem", marginLeft: "0.35rem" }} title={`${dayTicks.toLocaleString()} ticks (partial day)`}>⚠ partial</span>}
+                        </td>
                         <td style={{ color: day.day_buys > 0 ? "#10b981" : "#94a3b8" }}>{day.day_buys || "—"}</td>
                         <td style={{ color: day.day_sells > 0 ? "#ef4444" : "#94a3b8" }}>{day.day_sells || "—"}</td>
                         <td>{day.num_trades}</td>
@@ -523,10 +534,22 @@ export default function TickBacktestView() {
           )}
 
           {/* Price chart with VWAP and trade markers */}
-          {runResult && chartDay && runResult.price_series?.[chartDay] && (
+          {runResult && chartDay && runResult.price_series?.[chartDay] && (() => {
+            const chartTicks = runResult.ticks_per_day?.[chartDay] ?? 0;
+            const allCounts = Object.values(runResult.ticks_per_day ?? {});
+            const medCount = allCounts.length > 1
+              ? [...allCounts].sort((a, b) => a - b)[Math.floor(allCounts.length / 2)]
+              : chartTicks;
+            const chartPartial = medCount > 0 && chartTicks < medCount * 0.5;
+            return (
             <div style={{ marginTop: "0.5rem" }}>
-              <div style={{ fontSize: "0.8rem", color: "#94a3b8", marginBottom: "0.25rem" }}>
-                Price &amp; VWAP — {chartDay}
+              <div style={{ fontSize: "0.8rem", color: "#94a3b8", marginBottom: "0.25rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                <span>Price &amp; VWAP — {chartDay}</span>
+                {chartPartial && (
+                  <span style={{ fontSize: "0.7rem", color: "#f59e0b", background: "rgba(245,158,11,0.1)", padding: "0.1rem 0.4rem", borderRadius: "4px" }}>
+                    ⚠ Partial day ({chartTicks.toLocaleString()} ticks)
+                  </span>
+                )}
               </div>
               <BacktestChart
                 priceData={runResult.price_series[chartDay]}
@@ -534,7 +557,8 @@ export default function TickBacktestView() {
                 selectedDate={chartDay}
               />
             </div>
-          )}
+            );
+          })()}
         </div>
       </div>
 

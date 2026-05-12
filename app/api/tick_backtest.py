@@ -226,6 +226,7 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
         price_by_day: dict[str, list] = defaultdict(list)
         vwap_state: dict[str, dict] = {}  # cum_vp, cum_vol per day
         tick_idx_by_day: dict[str, int] = defaultdict(int)
+        last_tick_by_day: dict[str, tuple] = {}  # day → (tick, vwap_val) for flushing
 
         for t in ticks:
             day = _trading_date_str(t)
@@ -235,13 +236,29 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
             st["cum_vp"] += tp * t.volume
             st["cum_vol"] += t.volume
 
+            vwap_val = st["cum_vp"] / st["cum_vol"] if st["cum_vol"] > 0 else t.close
+            last_tick_by_day[day] = (t, vwap_val)
+
             if tick_idx_by_day[day] % 12 == 0:
-                vwap_val = st["cum_vp"] / st["cum_vol"] if st["cum_vol"] > 0 else t.close
                 price_by_day[day].append({
                     "t": t.time.isoformat(),
                     "p": round(t.close, 4),
                     "v": round(vwap_val, 4),
                 })
+
+        # Flush the last data point for each day so partial days always
+        # have chart data and full days don't lose their trailing ticks.
+        for day, (last_t, last_vwap) in last_tick_by_day.items():
+            count = tick_idx_by_day[day]
+            if count % 12 != 0:  # trailing ticks not yet emitted
+                price_by_day[day].append({
+                    "t": last_t.time.isoformat(),
+                    "p": round(last_t.close, 4),
+                    "v": round(last_vwap, 4),
+                })
+
+        # Tick counts per day so the frontend can flag partial days
+        ticks_per_day = dict(tick_idx_by_day)
 
         # Serialize trades
         trades_data = []
@@ -270,6 +287,7 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
                 "tick_count": len(ticks),
                 "trades": trades_data,
                 "price_series": dict(price_by_day),
+                "ticks_per_day": ticks_per_day,
                 **result_data,
             },
         })

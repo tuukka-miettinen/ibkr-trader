@@ -164,3 +164,108 @@ class BacktestRun(Base):
         Index("ix_backtest_run_algo_symbol", "algorithm_id", "symbol"),
         Index("ix_backtest_run_pnl", "total_pnl_pct"),
     )
+
+
+# ── Live paper-trading models ─────────────────────────────────────────────
+
+
+class LiveSession(Base):
+    """A live (paper) trading session."""
+
+    __tablename__ = "live_session"
+
+    id = Column(String(36), primary_key=True, default=lambda: __import__("uuid").uuid4().hex)
+    name = Column(String(255), nullable=False)
+    status = Column(
+        Enum("created", "running", "stopped", "error", name="live_session_status"),
+        nullable=False,
+        default="created",
+    )
+    order_type = Column(
+        Enum("market", "limit", name="live_order_type"),
+        nullable=False,
+        default="market",
+    )
+    position_size = Column(Float, nullable=False, default=1000.0)
+    max_entries = Column(Integer, nullable=False, default=5)
+    max_daily_loss = Column(Float, nullable=False, default=500.0)
+    strategy_state_json = Column(JSON, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    started_at = Column(DateTime, nullable=True)
+    stopped_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_live_session_status", "status"),
+    )
+
+
+class LiveSessionSymbol(Base):
+    """Per-symbol configuration and state within a live session."""
+
+    __tablename__ = "live_session_symbol"
+
+    id = Column(String(36), primary_key=True, default=lambda: __import__("uuid").uuid4().hex)
+    session_id = Column(String(36), ForeignKey("live_session.id"), nullable=False, index=True)
+    symbol = Column(String(16), nullable=False)
+    algorithm_id = Column(String(36), ForeignKey("strategy_algorithm.id"), nullable=False)
+    allocated_capital = Column(Float, nullable=False, default=10000.0)
+    position_size = Column(Float, nullable=False, default=1000.0)
+    max_entries = Column(Integer, nullable=False, default=5)
+    current_shares = Column(Float, nullable=False, default=0.0)
+    current_cost = Column(Float, nullable=False, default=0.0)
+    cash_remaining = Column(Float, nullable=False, default=10000.0)
+    realized_pnl = Column(Float, nullable=False, default=0.0)
+    unrealized_pnl = Column(Float, nullable=False, default=0.0)
+    daily_realized_pnl = Column(Float, nullable=False, default=0.0)
+    last_price = Column(Float, nullable=True)
+    strategy_state_json = Column(JSON, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "symbol", name="uq_live_session_symbol"),
+        Index("ix_live_session_symbol_lookup", "session_id", "symbol"),
+    )
+
+
+class LiveTrade(Base):
+    """An executed trade within a live session."""
+
+    __tablename__ = "live_trade"
+
+    id = Column(String(36), primary_key=True, default=lambda: __import__("uuid").uuid4().hex)
+    session_id = Column(String(36), ForeignKey("live_session.id"), nullable=False, index=True)
+    symbol = Column(String(16), nullable=False)
+    side = Column(Enum("buy", "sell", name="trade_side"), nullable=False)
+    order_type = Column(Enum("market", "limit", name="trade_order_type"), nullable=False)
+    shares = Column(Float, nullable=False)
+    price = Column(Float, nullable=False)
+    cost = Column(Float, nullable=False)
+    pnl = Column(Float, nullable=True)
+    pnl_pct = Column(Float, nullable=True)
+    ibkr_order_id = Column(Integer, nullable=True)
+    status = Column(
+        Enum("pending", "filled", "cancelled", "error", name="trade_status"),
+        nullable=False,
+        default="pending",
+    )
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_live_trade_session_symbol", "session_id", "symbol"),
+        Index("ix_live_trade_created", "created_at"),
+    )
+
+
+class LivePositionEntry(Base):
+    """Individual buy entry within a position (mirrors backtest position_entries)."""
+
+    __tablename__ = "live_position_entry"
+
+    id = Column(String(36), primary_key=True, default=lambda: __import__("uuid").uuid4().hex)
+    session_symbol_id = Column(String(36), ForeignKey("live_session_symbol.id"), nullable=False, index=True)
+    time = Column(DateTime(timezone=True), nullable=False)
+    price = Column(Float, nullable=False)
+    shares = Column(Float, nullable=False)
+    cost = Column(Float, nullable=False)
+    ibkr_order_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
