@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+from collections import defaultdict
+from datetime import timedelta
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -20,6 +23,8 @@ router = APIRouter(prefix="/api/tick-backtest", tags=["tick-backtest"])
 strategy_repo = StrategyRepository()
 
 DEFAULT_TICK_SCRIPT = """\
+STRATEGY_NAME = "unnamed"
+
 # Tick-level strategy: called once for every 5-second bar.
 #
 # state.tick          — current 5s Candle (.time, .open, .high, .low, .close, .volume)
@@ -56,18 +61,23 @@ def on_tick(state):
 
 
 class FetchTicksRequest(BaseModel):
-    symbol: str = "AAPL"
-    days: int = Field(default=1, ge=1, le=7)
+    symbol: str = "NBIS"
+    days: int = Field(default=7, ge=1, le=7)
     force: bool = False
-    extended: bool = False
+    extended: bool = True
+
+
+def _extract_strategy_name(script: str) -> str:
+    """Extract STRATEGY_NAME variable from script, default to 'unnamed'."""
+    m = re.search(r'^STRATEGY_NAME\s*=\s*["\'](.+?)["\']', script, re.MULTILINE)
+    return m.group(1) if m else "unnamed"
 
 
 class RunTickBacktestRequest(BaseModel):
-    symbol: str = "AAPL"
-    days: int = Field(default=1, ge=1, le=7)
-    extended: bool = False
+    symbol: str = "NBIS"
+    days: int = Field(default=7, ge=1, le=7)
+    extended: bool = True
     script: str = DEFAULT_TICK_SCRIPT
-    name: str = Field(default="unnamed", max_length=255)
     description: str | None = None
     starting_capital: float = Field(default=10000.0, gt=0)
     position_size: float = Field(default=1000.0, gt=0)
@@ -182,9 +192,10 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
 
         # Stage 4: Save results
         yield _sse({"stage": "save", "message": "Saving results..."})
+        algo_name = _extract_strategy_name(body.script)
         async with get_db_context() as session:
             algo = await strategy_repo.save_algorithm(
-                session, body.name, body.script, body.description,
+                session, algo_name, body.script, body.description,
             )
             result_data = {
                 "summary": summarize_result(result),
@@ -205,6 +216,47 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
                 lookback_days=body.days,
             )
 
+        # Build price series with VWAP per trading day (sampled every 12th tick ≈ 1 min)
+        def _trading_date_str(candle) -> str:
+            d = candle.time.date()
+            if candle.time.hour < 8:
+                d = d - timedelta(days=1)
+            return d.isoformat()
+
+        price_by_day: dict[str, list] = defaultdict(list)
+        vwap_state: dict[str, dict] = {}  # cum_vp, cum_vol per day
+        tick_idx_by_day: dict[str, int] = defaultdict(int)
+
+        for t in ticks:
+            day = _trading_date_str(t)
+            tick_idx_by_day[day] += 1
+            tp = (t.high + t.low + t.close) / 3.0
+            st = vwap_state.setdefault(day, {"cum_vp": 0.0, "cum_vol": 0})
+            st["cum_vp"] += tp * t.volume
+            st["cum_vol"] += t.volume
+
+            if tick_idx_by_day[day] % 12 == 0:
+                vwap_val = st["cum_vp"] / st["cum_vol"] if st["cum_vol"] > 0 else t.close
+                price_by_day[day].append({
+                    "t": t.time.isoformat(),
+                    "p": round(t.close, 4),
+                    "v": round(vwap_val, 4),
+                })
+
+        # Serialize trades
+        trades_data = []
+        for trade in result.trades:
+            trades_data.append({
+                "entry_time": trade.entry_time,
+                "exit_time": trade.exit_time,
+                "entry_price": trade.entry_price,
+                "exit_price": trade.exit_price,
+                "dollar_pnl": trade.dollar_pnl,
+                "pnl_pct": trade.pnl_pct,
+                "shares": trade.shares,
+                "entries": trade.entries,
+            })
+
         # Final result event
         yield _sse({
             "stage": "done",
@@ -216,6 +268,8 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
                 },
                 "run": {"id": run.id},
                 "tick_count": len(ticks),
+                "trades": trades_data,
+                "price_series": dict(price_by_day),
                 **result_data,
             },
         })

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import Editor from "@monaco-editor/react";
 
 import type { Algorithm, BacktestRunSummary } from "../lib/types";
+import BacktestChart, { type PricePoint, type TradeData } from "./BacktestChart";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
@@ -12,6 +13,9 @@ type DailySummary = {
   total_dollar_pnl: number;
   total_pnl_pct: number;
   win_rate: number;
+  avg_trade_pct: number;
+  day_buys: number;
+  day_sells: number;
   unrealized_pnl: number;
   position_shares: number;
   position_cost: number;
@@ -25,7 +29,9 @@ type DataStatus = {
   range: { start: string | null; end: string | null };
 };
 
-const DEFAULT_TICK_SCRIPT = `# Tick-level strategy: called once for every 5-second bar.
+const DEFAULT_TICK_SCRIPT = `STRATEGY_NAME = "unnamed"
+
+# Tick-level strategy: called once for every 5-second bar.
 #
 # state.tick          — current 5s Candle (.time, .open, .high, .low, .close, .volume)
 # state.candles       — dict[Timeframe, list[Candle]]  completed higher-TF candles
@@ -88,13 +94,12 @@ function saveLastStrategy(name: string, script: string) {
 export default function TickBacktestView() {
   const saved = loadLastStrategy();
   const [symbol, setSymbol] = useState("NBIS");
-  const [days, setDays] = useState(1);
+  const [days, setDays] = useState(7);
   const [script, setScript] = useState(saved?.script ?? DEFAULT_TICK_SCRIPT);
-  const [algoName, setAlgoName] = useState(saved?.name ?? "unnamed");
   const [startingCapital, setStartingCapital] = useState(10000);
   const [positionSize, setPositionSize] = useState(1000);
   const [maxEntries, setMaxEntries] = useState(5);
-  const [extended, setExtended] = useState(false);
+  const [extended, setExtended] = useState(true);
 
   const [dataStatus, setDataStatus] = useState<DataStatus | null>(null);
 
@@ -107,6 +112,8 @@ export default function TickBacktestView() {
     tick_count: number;
     summary: Record<string, number>;
     daily: DailySummary[];
+    trades: TradeData[];
+    price_series: Record<string, PricePoint[]>;
   } | null>(null);
 
   const [algorithms, setAlgorithms] = useState<Algorithm[]>([]);
@@ -114,6 +121,7 @@ export default function TickBacktestView() {
   const [showComparison, setShowComparison] = useState(false);
   const [favorites, setFavorites] = useState<Algorithm[]>([]);
   const [showStrategyPicker, setShowStrategyPicker] = useState(false);
+  const [chartDay, setChartDay] = useState<string | null>(null);
 
   async function refreshDataStatus(sym?: string) {
     const s = sym ?? symbol;
@@ -143,7 +151,6 @@ export default function TickBacktestView() {
           days,
           extended,
           script,
-          name: algoName,
           starting_capital: startingCapital,
           position_size: positionSize,
           max_entries: maxEntries,
@@ -179,6 +186,9 @@ export default function TickBacktestView() {
               throw new Error(evt.message);
             } else if (evt.stage === "done") {
               setRunResult(evt.result);
+              const days = evt.result.daily as DailySummary[];
+              const firstTradeDay = days.find((d: DailySummary) => d.num_trades > 0);
+              setChartDay(firstTradeDay?.date ?? days[0]?.date ?? null);
             } else {
               setRunProgress(evt.message);
             }
@@ -191,7 +201,8 @@ export default function TickBacktestView() {
 
       refreshDataStatus();
       // Save last used strategy
-      saveLastStrategy(algoName, script);
+      const extractedName = script.match(/^STRATEGY_NAME\s*=\s*["'](.+?)["']/m)?.[1] ?? "unnamed";
+      saveLastStrategy(extractedName, script);
     } catch (err: unknown) {
       setRunError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -224,7 +235,6 @@ export default function TickBacktestView() {
       if (res.ok) {
         const data = await res.json();
         setScript(data.script);
-        setAlgoName(data.name);
         saveLastStrategy(data.name, data.script);
       }
     } catch { /* ignore */ }
@@ -328,15 +338,6 @@ export default function TickBacktestView() {
         {/* Left: editor */}
         <div className="backtest-editor">
           <div className="editor-toolbar">
-            <label>
-              Strategy
-              <input
-                type="text"
-                value={algoName}
-                onChange={(e) => setAlgoName(e.target.value)}
-                style={{ width: 140 }}
-              />
-            </label>
             <button type="button" onClick={handleRun} disabled={runLoading}>
               {runLoading ? "Running…" : "▶ Run"}
             </button>
@@ -473,8 +474,11 @@ export default function TickBacktestView() {
                 <thead>
                   <tr>
                     <th>Date</th>
+                    <th>Buys</th>
+                    <th>Sells</th>
                     <th>Trades</th>
                     <th>Win Rate</th>
+                    <th>Avg Trade</th>
                     <th>Realized P&L</th>
                     <th>Unrealized P&L</th>
                     <th>Position</th>
@@ -485,11 +489,22 @@ export default function TickBacktestView() {
                     const hasTrades = day.num_trades > 0;
                     const hasUnrealized = (day.unrealized_pnl ?? 0) !== 0;
                     const hasPosition = (day.position_shares ?? 0) > 0;
+                    const isSelected = chartDay === day.date;
                     return (
-                      <tr key={day.date}>
+                      <tr key={day.date} onClick={() => setChartDay(day.date)}
+                        style={{
+                          cursor: "pointer",
+                          background: isSelected ? "rgba(56, 189, 248, 0.1)" : undefined,
+                          borderLeft: isSelected ? "2px solid #38bdf8" : "2px solid transparent",
+                        }}>
                         <td>{day.date}</td>
+                        <td style={{ color: day.day_buys > 0 ? "#10b981" : "#94a3b8" }}>{day.day_buys || "—"}</td>
+                        <td style={{ color: day.day_sells > 0 ? "#ef4444" : "#94a3b8" }}>{day.day_sells || "—"}</td>
                         <td>{day.num_trades}</td>
                         <td style={{ color: hasTrades ? "#e2e8f0" : "#94a3b8" }}>{hasTrades ? `${day.win_rate}%` : "—"}</td>
+                        <td style={{ color: hasTrades ? ((day.avg_trade_pct ?? 0) >= 0 ? "#10b981" : "#ef4444") : "#94a3b8" }}>
+                          {hasTrades ? formatSigned(day.avg_trade_pct ?? 0, "%") : "—"}
+                        </td>
                         <td style={{ color: hasTrades ? (day.total_pnl >= 0 ? "#10b981" : "#ef4444") : "#94a3b8" }}>
                           {hasTrades ? formatSignedCurrency(day.total_pnl) : "—"}
                         </td>
@@ -504,6 +519,20 @@ export default function TickBacktestView() {
                   })}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {/* Price chart with VWAP and trade markers */}
+          {runResult && chartDay && runResult.price_series?.[chartDay] && (
+            <div style={{ marginTop: "0.5rem" }}>
+              <div style={{ fontSize: "0.8rem", color: "#94a3b8", marginBottom: "0.25rem" }}>
+                Price &amp; VWAP — {chartDay}
+              </div>
+              <BacktestChart
+                priceData={runResult.price_series[chartDay]}
+                trades={runResult.trades}
+                selectedDate={chartDay}
+              />
             </div>
           )}
         </div>

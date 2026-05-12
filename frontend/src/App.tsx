@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import BacktestView from "./components/BacktestView";
 import CandlestickChart from "./components/CandlestickChart";
 import TickBacktestView from "./components/TickBacktestView";
-import type { Candle, SocketMessage, Timeframe, TimelineEvent } from "./lib/types";
+import type { Candle, SocketMessage, Timeframe } from "./lib/types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 const SOCKET_URL =
@@ -31,11 +30,10 @@ export default function App() {
   const [symbol, setSymbol] = useState("NBIS");
   const [timeframe, setTimeframe] = useState<Timeframe>("1m");
   const [candles, setCandles] = useState<Candle[]>([]);
-  const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [status, setStatus] = useState("Connecting");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<"live" | "backtest" | "tick-backtest">("live");
+  const [view, setView] = useState<"live" | "tick-backtest">("live");
   const socketRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -43,7 +41,6 @@ export default function App() {
     // when symbol or timeframe changes. The WebSocket effect below then
     // reconnects and delivers a fresh snapshot.
     setCandles([]);
-    setEvents([]);
     setLoading(true);
     setError(null);
   }, [symbol, timeframe]);
@@ -62,7 +59,6 @@ export default function App() {
       const message = JSON.parse(event.data) as SocketMessage;
       if (message.type === "snapshot") {
         setCandles(message.candles);
-        setEvents(message.events);
         setLoading(false);
         return;
       }
@@ -93,12 +89,6 @@ export default function App() {
     };
   }, [symbol, timeframe]);
 
-  const latestCandle = candles[candles.length - 1];
-  const sortedEvents = useMemo(
-    () => [...events].sort((left, right) => new Date(left.time).getTime() - new Date(right.time).getTime()),
-    [events],
-  );
-
   function handleApplySymbol() {
     const nextSymbol = symbolInput.trim().toUpperCase();
     if (!nextSymbol || nextSymbol === symbol) {
@@ -111,30 +101,8 @@ export default function App() {
 
   return (
     <main className="page-shell">
-      <section className="hero-panel">
-        <div>
-          <p className="eyebrow">Trading Platform Foundation</p>
-          <h1>Candlestick chart with event overlays and a Python live feed</h1>
-        </div>
-        <div className="status-grid">
-          <div>
-            <span>Status</span>
-            <strong>{status}</strong>
-          </div>
-          <div>
-            <span>Symbol</span>
-            <strong>{symbol}</strong>
-          </div>
-          <div>
-            <span>Last close</span>
-            <strong>{latestCandle ? latestCandle.close.toFixed(2) : "--"}</strong>
-          </div>
-        </div>
-      </section>
-
       <div className="tab-bar">
         <button type="button" className={`tab${view === "live" ? " active" : ""}`} onClick={() => setView("live")}>Live chart</button>
-        <button type="button" className={`tab${view === "backtest" ? " active" : ""}`} onClick={() => setView("backtest")}>Backtest</button>
         <button type="button" className={`tab${view === "tick-backtest" ? " active" : ""}`} onClick={() => setView("tick-backtest")}>Tick Backtest</button>
       </div>
 
@@ -165,34 +133,11 @@ export default function App() {
 
           <section className="content-grid">
             <article className="chart-panel">
-              <div className="panel-header">
-                <h2>Live candlesticks</h2>
-                <p>WebSocket updates from FastAPI with event markers on the series.</p>
-              </div>
-              <CandlestickChart candles={candles} events={events} timeframe={timeframe} />
+              <CandlestickChart candles={candles} events={[]} timeframe={timeframe} />
             </article>
-
-            <aside className="event-panel">
-              <div className="panel-header">
-                <h2>Timeline events</h2>
-                <p>Separate event objects so earnings and future annotations stay reusable for strategies and backtests.</p>
-              </div>
-              <ul className="event-list">
-                {sortedEvents.map((event) => (
-                  <li key={event.id}>
-                    <span className="event-type">{event.event_type}</span>
-                    <strong>{event.title}</strong>
-                    <p>{event.summary}</p>
-                    <time>{new Date(event.time).toLocaleString()}</time>
-                  </li>
-                ))}
-              </ul>
-            </aside>
           </section>
         </>
       )}
-
-      {view === "backtest" && <BacktestView />}
 
       {view === "tick-backtest" && <TickBacktestView />}
     </main>

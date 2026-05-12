@@ -207,6 +207,8 @@ def run_tick_backtest(
 
     current_date: str | None = None
     day_realized_trades: list[Trade] = []
+    day_buys = 0
+    day_sells = 0
     prev_close = 0.0
 
     # Pre-compute unique trading dates for progress reporting
@@ -222,9 +224,11 @@ def run_tick_backtest(
     completed_days = 0
 
     def _flush_day(date: str, close_price: float) -> None:
+        nonlocal day_buys, day_sells
         unrealized = (position_shares * close_price - position_cost) if position_shares > 0 else 0.0
         realized_pnl = round(sum(t.dollar_pnl for t in day_realized_trades), 4)
         wins = sum(1 for t in day_realized_trades if t.dollar_pnl > 0)
+        avg_pct = round(sum(t.pnl_pct for t in day_realized_trades) / len(day_realized_trades), 4) if day_realized_trades else 0.0
         daily_snapshots.append(DailySnapshot(
             date=date,
             realized_trades=len(day_realized_trades),
@@ -234,7 +238,12 @@ def run_tick_backtest(
             position_cost=round(position_cost, 4),
             day_close_price=round(close_price, 4),
             win_rate=round(wins / len(day_realized_trades) * 100, 1) if day_realized_trades else 0.0,
+            avg_trade_pct=avg_pct,
+            day_buys=day_buys,
+            day_sells=day_sells,
         ))
+        day_buys = 0
+        day_sells = 0
 
     for tick in ticks:
         tick_date = _trading_date(tick)
@@ -242,6 +251,8 @@ def run_tick_backtest(
         if current_date is not None and tick_date != current_date:
             _flush_day(current_date, prev_close)
             day_realized_trades = []
+            day_buys = 0
+            day_sells = 0
             completed_days += 1
             if on_progress:
                 on_progress({"completed_days": completed_days, "total_days": total_days})
@@ -305,6 +316,7 @@ def run_tick_backtest(
                     "shares": round(shares, 8),
                     "cost": round(cost, 4),
                 })
+                day_buys += 1
         elif signal == "sell" and position_shares > 0:
             proceeds = position_shares * tick.close
             dollar_pnl = proceeds - position_cost
@@ -328,6 +340,7 @@ def run_tick_backtest(
             position_entries = []
             position_shares = 0.0
             position_cost = 0.0
+            day_sells += 1
 
     # Flush last day
     if current_date is not None and ticks:

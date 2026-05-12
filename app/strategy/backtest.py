@@ -36,6 +36,9 @@ class DailySnapshot:
     position_cost: float = 0.0
     day_close_price: float = 0.0
     win_rate: float = 0.0
+    avg_trade_pct: float = 0.0
+    day_buys: int = 0
+    day_sells: int = 0
 
 
 @dataclass

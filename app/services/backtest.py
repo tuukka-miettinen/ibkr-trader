@@ -222,6 +222,9 @@ def summarize_daily_snapshots(result: bt.BacktestResult) -> list[dict]:
             if snap.realized_trades and snap.position_cost > 0
             else 0.0,
             "win_rate": snap.win_rate,
+            "avg_trade_pct": snap.avg_trade_pct,
+            "day_buys": snap.day_buys,
+            "day_sells": snap.day_sells,
             "unrealized_pnl": snap.unrealized_pnl,
             "position_shares": snap.position_shares,
             "position_cost": snap.position_cost,
