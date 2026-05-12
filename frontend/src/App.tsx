@@ -2,13 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import BacktestView from "./components/BacktestView";
 import CandlestickChart from "./components/CandlestickChart";
+import TickBacktestView from "./components/TickBacktestView";
 import type { Candle, SocketMessage, Timeframe, TimelineEvent } from "./lib/types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 const SOCKET_URL =
   import.meta.env.VITE_WS_URL ??
   `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws/market`;
-const TIMEFRAMES: Timeframe[] = ["1m", "5m", "15m", "1h"];
+const TIMEFRAMES: Timeframe[] = ["1m", "3m", "5m", "15m", "1h"];
 
 function mergeCandleUpdate(existing: Candle[], incoming: Candle): Candle[] {
   const next = existing.slice();
@@ -26,15 +27,15 @@ function mergeCandleUpdate(existing: Candle[], incoming: Candle): Candle[] {
 }
 
 export default function App() {
-  const [symbolInput, setSymbolInput] = useState("AAPL");
-  const [symbol, setSymbol] = useState("AAPL");
+  const [symbolInput, setSymbolInput] = useState("NBIS");
+  const [symbol, setSymbol] = useState("NBIS");
   const [timeframe, setTimeframe] = useState<Timeframe>("1m");
   const [candles, setCandles] = useState<Candle[]>([]);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [status, setStatus] = useState("Connecting");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<"live" | "backtest">("live");
+  const [view, setView] = useState<"live" | "backtest" | "tick-backtest">("live");
   const socketRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -134,6 +135,7 @@ export default function App() {
       <div className="tab-bar">
         <button type="button" className={`tab${view === "live" ? " active" : ""}`} onClick={() => setView("live")}>Live chart</button>
         <button type="button" className={`tab${view === "backtest" ? " active" : ""}`} onClick={() => setView("backtest")}>Backtest</button>
+        <button type="button" className={`tab${view === "tick-backtest" ? " active" : ""}`} onClick={() => setView("tick-backtest")}>Tick Backtest</button>
       </div>
 
       {view === "live" && (
@@ -191,6 +193,8 @@ export default function App() {
       )}
 
       {view === "backtest" && <BacktestView />}
+
+      {view === "tick-backtest" && <TickBacktestView />}
     </main>
   );
 }

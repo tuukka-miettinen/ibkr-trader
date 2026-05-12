@@ -1,0 +1,348 @@
+"""API routes for tick-level backtesting."""
+from __future__ import annotations
+
+import asyncio
+import json
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+from app.db.database import get_db_context
+from app.db.strategies import StrategyRepository
+from app.models.market_data import Timeframe
+from app.services.backtest import summarize_daily_snapshots, summarize_result
+from app.services.tick_fetcher import tick_fetcher
+from app.strategy.sandbox import compile_tick_script, validate_tick_script
+from app.strategy.tick_backtest import TickBacktestConfig, run_tick_backtest
+
+router = APIRouter(prefix="/api/tick-backtest", tags=["tick-backtest"])
+strategy_repo = StrategyRepository()
+
+DEFAULT_TICK_SCRIPT = """\
+# Tick-level strategy: called once for every 5-second bar.
+#
+# state.tick          — current 5s Candle (.time, .open, .high, .low, .close, .volume)
+# state.candles       — dict[Timeframe, list[Candle]]  completed higher-TF candles
+# state.current_candles — dict[Timeframe, Candle|None]  in-progress candles
+# state.closed        — dict[Timeframe, Candle|None]   candle that just closed this tick
+# state.position      — PositionInfo|None  (.shares, .avg_price, .unrealized_pnl)
+# state.cash          — available cash
+# state.portfolio_value — cash + market value
+#
+# Return {"signal": "buy"} or {"signal": "sell"} or {"signal": None}
+
+def on_tick(state):
+    # Example: buy when a 5m candle closes with RSI crossing above 30
+    closed_5m = state.closed.get("5m")
+    if closed_5m is None:
+        return {"signal": None}
+
+    candles_5m = state.candles.get("5m", [])
+    if len(candles_5m) < 15:
+        return {"signal": None}
+
+    rsi = ta.rsi(candles_5m, 14)
+
+    if state.position is None:
+        if rsi[-2] is not None and rsi[-2] <= 30 and rsi[-1] is not None and rsi[-1] > 30:
+            return {"signal": "buy"}
+    else:
+        if rsi[-2] is not None and rsi[-2] >= 70 and rsi[-1] is not None and rsi[-1] < 70:
+            return {"signal": "sell"}
+
+    return {"signal": None}
+"""
+
+
+class FetchTicksRequest(BaseModel):
+    symbol: str = "AAPL"
+    days: int = Field(default=1, ge=1, le=7)
+    force: bool = False
+    extended: bool = False
+
+
+class RunTickBacktestRequest(BaseModel):
+    symbol: str = "AAPL"
+    days: int = Field(default=1, ge=1, le=7)
+    extended: bool = False
+    script: str = DEFAULT_TICK_SCRIPT
+    name: str = Field(default="unnamed", max_length=255)
+    description: str | None = None
+    starting_capital: float = Field(default=10000.0, gt=0)
+    position_size: float = Field(default=1000.0, gt=0)
+    max_entries: int = Field(default=5, ge=1, le=100)
+    candle_timeframes: list[Timeframe] = Field(default=[
+        Timeframe.ONE_MINUTE,
+        Timeframe.FIVE_MINUTES,
+        Timeframe.FIFTEEN_MINUTES,
+    ])
+
+
+@router.post("/fetch")
+async def fetch_ticks(body: FetchTicksRequest) -> dict:
+    """Fetch 5-second tick data from IBKR and store in the database."""
+    sym = body.symbol.strip().upper()
+    if not sym:
+        raise HTTPException(status_code=422, detail="symbol is required")
+
+    result = await tick_fetcher.fetch_and_store(sym, body.days, force=body.force, extended=body.extended)
+    return {
+        "symbol": sym,
+        "days": body.days,
+        **result,
+    }
+
+
+@router.post("/run")
+async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
+    """Run a tick-level backtest, streaming progress as SSE events."""
+    sym = body.symbol.strip().upper()
+    if not sym:
+        raise HTTPException(status_code=422, detail="symbol is required")
+
+    # Validate script early (before streaming starts)
+    try:
+        validate_tick_script(body.script)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    on_tick_fn = compile_tick_script(body.script)
+
+    async def event_stream():
+        def _sse(data: dict) -> str:
+            return f"data: {json.dumps(data)}\n\n"
+
+        # Stage 1: Fetch data
+        yield _sse({"stage": "fetch", "message": "Fetching data..."})
+
+        fetch_result = await tick_fetcher.fetch_and_store(
+            sym, body.days, extended=body.extended,
+            on_progress=lambda p: None,  # progress tracked via total/cached
+        )
+        cached = fetch_result["cached_chunks"]
+        fetched = fetch_result["fetched_chunks"]
+        total = fetch_result["total_chunks"]
+        if fetched > 0:
+            yield _sse({"stage": "fetch", "message": f"Fetched {fetched} new chunks ({cached} cached, {total} total)"})
+        else:
+            yield _sse({"stage": "fetch", "message": f"All {total} chunks cached"})
+
+        # Stage 2: Load ticks
+        yield _sse({"stage": "load", "message": "Loading ticks..."})
+        ticks = await tick_fetcher.load_ticks(sym, body.days, extended=body.extended)
+        if not ticks:
+            yield _sse({"stage": "error", "message": f"No tick data available for {sym}"})
+            return
+
+        yield _sse({"stage": "load", "message": f"Loaded {len(ticks):,} ticks"})
+
+        # Stage 3: Run backtest
+        yield _sse({"stage": "backtest", "message": "Running backtest...", "total_days": 0})
+
+        progress_queue: asyncio.Queue = asyncio.Queue()
+
+        def backtest_progress(p: dict):
+            progress_queue.put_nowait(p)
+
+        config = TickBacktestConfig(
+            starting_capital=body.starting_capital,
+            position_size=body.position_size,
+            max_entries=body.max_entries,
+            candle_timeframes=body.candle_timeframes,
+        )
+
+        # Run backtest in thread, poll queue for progress
+        loop = asyncio.get_event_loop()
+        task = loop.run_in_executor(
+            None, lambda: run_tick_backtest(ticks, on_tick_fn, config, on_progress=backtest_progress)
+        )
+
+        while not task.done():
+            try:
+                p = await asyncio.wait_for(progress_queue.get(), timeout=0.1)
+                yield _sse({
+                    "stage": "backtest",
+                    "message": f"Processing day {p['completed_days']}/{p['total_days']}",
+                })
+            except asyncio.TimeoutError:
+                continue
+
+        result = await task
+
+        # Drain remaining progress events
+        while not progress_queue.empty():
+            p = progress_queue.get_nowait()
+            yield _sse({
+                "stage": "backtest",
+                "message": f"Processing day {p['completed_days']}/{p['total_days']}",
+            })
+
+        yield _sse({"stage": "backtest", "message": f"Backtest complete — {len(ticks):,} ticks processed"})
+
+        # Stage 4: Save results
+        yield _sse({"stage": "save", "message": "Saving results..."})
+        async with get_db_context() as session:
+            algo = await strategy_repo.save_algorithm(
+                session, body.name, body.script, body.description,
+            )
+            result_data = {
+                "summary": summarize_result(result),
+                "daily": summarize_daily_snapshots(result),
+            }
+            run = await strategy_repo.save_run(
+                session,
+                algorithm_id=algo.id,
+                symbol=sym,
+                config={
+                    "starting_capital": body.starting_capital,
+                    "position_size": body.position_size,
+                    "max_entries": body.max_entries,
+                    "candle_timeframes": [tf.value for tf in body.candle_timeframes],
+                },
+                result_data=result_data,
+                mode="tick",
+                lookback_days=body.days,
+            )
+
+        # Final result event
+        yield _sse({
+            "stage": "done",
+            "result": {
+                "algorithm": {
+                    "id": algo.id,
+                    "name": algo.name,
+                    "version": algo.version,
+                },
+                "run": {"id": run.id},
+                "tick_count": len(ticks),
+                **result_data,
+            },
+        })
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.get("/algorithms")
+async def list_algorithms() -> dict:
+    """List all saved strategy algorithms."""
+    async with get_db_context() as session:
+        algos = await strategy_repo.list_algorithms(session)
+
+    return {
+        "algorithms": [
+            {
+                "id": a.id,
+                "name": a.name,
+                "version": a.version,
+                "description": a.description,
+                "is_favorite": a.is_favorite,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+            }
+            for a in algos
+        ],
+    }
+
+
+@router.get("/runs")
+async def list_runs(algorithm_id: str | None = None, symbol: str | None = None) -> dict:
+    """List backtest runs, optionally filtered by algorithm or symbol."""
+    async with get_db_context() as session:
+        runs = await strategy_repo.list_runs(session, algorithm_id, symbol)
+
+    return {"runs": runs}
+
+
+@router.get("/runs/{run_id}")
+async def get_run(run_id: str) -> dict:
+    """Get full details of a backtest run."""
+    async with get_db_context() as session:
+        run = await strategy_repo.get_run(session, run_id)
+
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    return {
+        "id": run.id,
+        "algorithm_id": run.algorithm_id,
+        "symbol": run.symbol,
+        "mode": run.mode,
+        "lookback_days": run.lookback_days,
+        "config": run.config_json,
+        "result": run.result_json,
+        "num_trades": run.num_trades,
+        "total_pnl": run.total_pnl,
+        "total_pnl_pct": run.total_pnl_pct,
+        "win_rate": run.win_rate,
+        "final_balance": run.final_balance,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+    }
+
+
+@router.get("/data-status/{symbol}")
+async def get_data_status(symbol: str) -> dict:
+    """Get information about available tick data for a symbol."""
+    sym = symbol.strip().upper()
+    if not sym:
+        raise HTTPException(status_code=422, detail="symbol is required")
+
+    return await tick_fetcher.get_data_status(sym)
+
+
+@router.get("/algorithms/favorites")
+async def list_favorites() -> dict:
+    """List favorite algorithms."""
+    async with get_db_context() as session:
+        algos = await strategy_repo.list_favorites(session)
+
+    return {
+        "algorithms": [
+            {
+                "id": a.id,
+                "name": a.name,
+                "version": a.version,
+                "description": a.description,
+                "script": a.script,
+                "is_favorite": a.is_favorite,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+            }
+            for a in algos
+        ],
+    }
+
+
+@router.get("/algorithms/{algorithm_id}")
+async def get_algorithm(algorithm_id: str) -> dict:
+    """Get a specific algorithm including its script."""
+    async with get_db_context() as session:
+        algo = await strategy_repo.get_algorithm(session, algorithm_id)
+
+    if algo is None:
+        raise HTTPException(status_code=404, detail="Algorithm not found")
+
+    return {
+        "id": algo.id,
+        "name": algo.name,
+        "version": algo.version,
+        "script": algo.script,
+        "description": algo.description,
+        "is_favorite": algo.is_favorite,
+        "created_at": algo.created_at.isoformat() if algo.created_at else None,
+    }
+
+
+@router.patch("/algorithms/{algorithm_id}/favorite")
+async def toggle_favorite(algorithm_id: str) -> dict:
+    """Toggle the favorite status of an algorithm."""
+    async with get_db_context() as session:
+        algo = await strategy_repo.get_algorithm(session, algorithm_id)
+        if algo is None:
+            raise HTTPException(status_code=404, detail="Algorithm not found")
+        algo = await strategy_repo.set_favorite(session, algorithm_id, not algo.is_favorite)
+
+    return {
+        "id": algo.id,
+        "name": algo.name,
+        "version": algo.version,
+        "is_favorite": algo.is_favorite,
+    }

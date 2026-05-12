@@ -7,7 +7,9 @@ from pydantic import BaseModel, Field
 
 
 class Timeframe(StrEnum):
+    FIVE_SECONDS = "5s"
     ONE_MINUTE = "1m"
+    THREE_MINUTES = "3m"
     FIVE_MINUTES = "5m"
     FIFTEEN_MINUTES = "15m"
     ONE_HOUR = "1h"

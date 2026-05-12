@@ -16,7 +16,9 @@ from app.providers.base import MarketDataError, MarketDataProvider
 
 
 BAR_SIZE_MAP = {
+    Timeframe.FIVE_SECONDS: "5 secs",
     Timeframe.ONE_MINUTE: "1 min",
+    Timeframe.THREE_MINUTES: "3 mins",
     Timeframe.FIVE_MINUTES: "5 mins",
     Timeframe.FIFTEEN_MINUTES: "15 mins",
     Timeframe.ONE_HOUR: "1 hour",
@@ -59,6 +61,17 @@ class IBKRMarketDataProvider(MarketDataProvider):
     def get_history(self, symbol: str, timeframe: Timeframe, limit: int) -> list[Candle]:
         return self._run_on_ib_thread(lambda: self._get_history_sync(symbol, timeframe, limit))
 
+    def get_history_since(
+        self,
+        symbol: str,
+        timeframe: Timeframe,
+        start_time: datetime | None,
+        limit: int,
+    ) -> list[Candle]:
+        if start_time is None:
+            return self.get_history(symbol, timeframe, limit)
+        return self._run_on_ib_thread(lambda: self._get_history_since_sync(symbol, timeframe, start_time, limit))
+
     def _get_history_sync(self, symbol: str, timeframe: Timeframe, limit: int) -> list[Candle]:
         contract = self._contract(symbol)
         self._ensure_connected()
@@ -79,6 +92,33 @@ class IBKRMarketDataProvider(MarketDataProvider):
 
         candles = [self._to_candle(symbol, timeframe, bar) for bar in bars]
         return candles[-limit:]
+
+    def _get_history_since_sync(
+        self,
+        symbol: str,
+        timeframe: Timeframe,
+        start_time: datetime,
+        limit: int,
+    ) -> list[Candle]:
+        contract = self._contract(symbol)
+        self._ensure_connected()
+        ib = self._get_ib()
+        bars = ib.reqHistoricalData(
+            contract,
+            endDateTime="",
+            durationStr=self._duration_since_str(start_time, timeframe),
+            barSizeSetting=BAR_SIZE_MAP[timeframe],
+            whatToShow="TRADES",
+            useRTH=self._use_rth,
+            formatDate=2,
+            keepUpToDate=False,
+        )
+
+        if not bars:
+            return []
+
+        candles = [self._to_candle(symbol, timeframe, bar) for bar in bars]
+        return [candle for candle in candles if candle.time > start_time][-limit:]
 
     def get_live_price(self, symbol: str) -> float | None:
         return self._run_on_ib_thread(lambda: self._get_live_price_sync(symbol))
@@ -178,8 +218,24 @@ class IBKRMarketDataProvider(MarketDataProvider):
 
     def _duration_str(self, limit: int, timeframe: Timeframe) -> str:
         # IBKR durationStr units: S=seconds, D=days, W=weeks, M=months, Y=years
-        # There is NO minutes unit — the old code was sending "120 M" (months) by mistake.
-        total = self._step(timeframe) * max(limit, 1)
+        # Convert bar count to calendar days, not naive wall-clock time.
+        # RTH is 6.5 hours; bars only appear during trading hours, so
+        # N bars of 5m ≠ N*5 minutes of calendar time.
+        step = self._step(timeframe)
+        rth_seconds = 6 * 3600 + 30 * 60  # 23400s = 6.5 hours
+        bars_per_day = max(rth_seconds // int(step.total_seconds()), 1)
+        trading_days = math.ceil(max(limit, 1) / bars_per_day)
+        # 5 trading days ≈ 7 calendar days; +1 buffer for partial days/holidays
+        calendar_days = math.ceil(trading_days * 7 / 5) + 1
+        return self._duration_for_delta(timedelta(days=max(calendar_days, 1)))
+
+    def _duration_since_str(self, start_time: datetime, timeframe: Timeframe) -> str:
+        current_time = datetime.now(tz=UTC)
+        normalized_start = start_time if start_time.tzinfo is not None else start_time.replace(tzinfo=UTC)
+        total = max(current_time - normalized_start, self._step(timeframe)) + self._step(timeframe)
+        return self._duration_for_delta(total)
+
+    def _duration_for_delta(self, total: timedelta) -> str:
         seconds = int(total.total_seconds())
         if total <= timedelta(days=1):
             return f"{max(seconds, 1800)} S"
@@ -193,8 +249,12 @@ class IBKRMarketDataProvider(MarketDataProvider):
         return f"{years} Y"
 
     def _step(self, timeframe: Timeframe) -> timedelta:
+        if timeframe == Timeframe.FIVE_SECONDS:
+            return timedelta(seconds=5)
         if timeframe == Timeframe.ONE_MINUTE:
             return timedelta(minutes=1)
+        if timeframe == Timeframe.THREE_MINUTES:
+            return timedelta(minutes=3)
         if timeframe == Timeframe.FIVE_MINUTES:
             return timedelta(minutes=5)
         if timeframe == Timeframe.FIFTEEN_MINUTES:

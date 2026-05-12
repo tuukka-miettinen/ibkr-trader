@@ -1,4 +1,4 @@
-export type Timeframe = "1m" | "5m" | "15m" | "1h";
+export type Timeframe = "5s" | "1m" | "3m" | "5m" | "15m" | "1h";
 
 export type Candle = {
   symbol: string;
@@ -9,6 +9,32 @@ export type Candle = {
   low: number;
   close: number;
   volume: number;
+};
+
+export type Algorithm = {
+  id: string;
+  name: string;
+  version: number;
+  description: string | null;
+  script?: string;
+  is_favorite?: boolean;
+  created_at: string | null;
+};
+
+export type BacktestRunSummary = {
+  id: string;
+  algorithm_id: string;
+  algorithm_name: string;
+  algorithm_version: number;
+  symbol: string;
+  mode: string;
+  lookback_days: number | null;
+  num_trades: number;
+  total_pnl: number;
+  total_pnl_pct: number;
+  win_rate: number;
+  final_balance: number;
+  created_at: string | null;
 };
 
 export type TimelineEvent = {
@@ -47,6 +73,85 @@ export type StatusMessage = {
 export type ErrorMessage = {
   type: "error";
   message: string;
+};
+
+// ============================================================================
+// Optimizer Types
+// ============================================================================
+
+export type OptimizationMode = "global" | "sector";
+
+export type ParameterKind = "integer" | "float" | "boolean" | "enum";
+
+export type ParameterSpec = {
+  kind: ParameterKind;
+  default: number | boolean | string;
+  minimum?: number;
+  maximum?: number;
+  step?: number;
+  choices?: string[];
+  description?: string;
+  allow_sector_override?: boolean;
+};
+
+export type OptimizationRequest = {
+  script: string;
+  symbols: string[];
+  timeframes: Timeframe[];
+  limit: number;
+  mode: OptimizationMode;
+  parameter_space: Record<string, ParameterSpec>;
+  iteration_budget: number;
+  train_ratio: number;
+  sector_map?: Record<string, string>;
+};
+
+export type CandidateScore = {
+  candidate_name: string;
+  overall_score: number;
+  pnl_component: number;
+  win_rate_component: number;
+  trade_count_component: number;
+  consistency_bonus: number;
+  holdout_pnl: number;
+  holdout_win_rate: number;
+  holdout_trades: number;
+  train_pnl: number;
+  train_trades: number;
+  justification: string;
+};
+
+export type OptimizationCandidate = {
+  candidate_name: string;
+  parameters: Record<string, number | boolean | string>;
+  rendered_script: string;
+  score_details: CandidateScore;
+};
+
+export type OptimizationJobStatus = "queued" | "running" | "completed" | "failed";
+
+export type OptimizationJob = {
+  job_id: string;
+  status: OptimizationJobStatus;
+  plan: OptimizationRequest;
+  leaderboard: OptimizationCandidate[];
+  best_candidate: OptimizationCandidate | null;
+  iterations_completed: number;
+  early_stop_reason: string | null;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+};
+
+export type OptimizationJobListItem = {
+  job_id: string;
+  status: OptimizationJobStatus;
+  provider: string;
+  created_at: string;
+  completed_at: string | null;
+  best_score: number | null;
+  best_candidate_name: string | null;
 };
 
 export type SocketMessage = SnapshotMessage | CandleUpdateMessage | StatusMessage | ErrorMessage;

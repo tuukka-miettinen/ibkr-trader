@@ -6,6 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.backtest import router as backtest_router
 from app.api.candles import router as candles_router
 from app.api.events import router as events_router
+from app.api.optimize import router as optimize_router
+from app.api.tick_backtest import router as tick_backtest_router
 from app.api.ws import router as ws_router
 
 # Comma-separated list of allowed origins. In Docker, Nginx proxies all traffic
@@ -32,4 +34,6 @@ def health() -> dict[str, str]:
 app.include_router(backtest_router)
 app.include_router(candles_router)
 app.include_router(events_router)
+app.include_router(optimize_router)
+app.include_router(tick_backtest_router)
 app.include_router(ws_router)

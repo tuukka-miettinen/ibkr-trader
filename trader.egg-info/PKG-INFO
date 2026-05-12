@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: trader
+Version: 0.1.0
+Summary: Trading platform foundation with FastAPI and a charting frontend
+Requires-Python: >=3.12
+Requires-Dist: alembic<2.0,>=1.13
+Requires-Dist: fastapi<1.0.0,>=0.115.0
+Requires-Dist: ib-insync<1.0.0,>=0.9.86
+Requires-Dist: openai<2.0.0,>=1.0.0
+Requires-Dist: pydantic<3.0.0,>=2.9.0
+Requires-Dist: psycopg[binary]<4.0,>=3.1
+Requires-Dist: sqlalchemy<3.0.0,>=2.0.0
+Requires-Dist: uvicorn[standard]<1.0.0,>=0.32.0
+Provides-Extra: dev
+Requires-Dist: httpx<1.0.0,>=0.28.0; extra == "dev"
+Requires-Dist: pytest<9.0.0,>=8.3.0; extra == "dev"
+Requires-Dist: pytest-asyncio<1.0.0,>=0.23.0; extra == "dev"

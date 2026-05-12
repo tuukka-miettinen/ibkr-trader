@@ -6,6 +6,7 @@
         "&": true,
         "docker compose": true,
         "New-Item": true,
-        "Out-Null": true
+        "Out-Null": true,
+        "alembic": true
     }
 }

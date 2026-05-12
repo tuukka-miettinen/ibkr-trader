@@ -7,23 +7,26 @@ import {
   createChart,
   type IChartApi,
   type ISeriesApi,
+  type Logical,
   type LogicalRange,
   type UTCTimestamp,
 } from "lightweight-charts";
 import type * as Monaco from "monaco-editor";
 
 import type { Timeframe } from "../lib/types";
+import OptimizerView from "./OptimizerView";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
-const TIMEFRAMES: Timeframe[] = ["1m", "5m", "15m", "1h"];
+const TIMEFRAMES: Timeframe[] = ["1m", "3m", "5m", "15m", "1h"];
+const QUICK_TIMEFRAMES: Timeframe[] = ["1m", "3m", "5m", "15m"];
 const BATCH_TIMEFRAMES: Timeframe[] = ["5m", "15m"];
-const DEFAULT_BATCH_LIMIT = 1638;
+const DEFAULT_LOOKBACK_DAYS = 21;
 const INDICATOR_COLORS = ["#38bdf8", "#f59e0b", "#a78bfa", "#34d399", "#fb923c", "#f472b6"];
 const DEFAULT_BATCH_SYMBOLS = [
-  "TSLA", "LUNR", "ASTS", "SATS", "RKLB", "RDW", "GAMB", "HOOD", "TSSI", "CRWV", "SOAR", "UUUU",
-  "SGML", "SOUN", "APP", "PMCB", "NBIS", "NIXX", "LNG", "CRM", "YOU", "SPOT", "SOFI", "LTBR",
-  "MSFT", "XOM", "JPM", "ADBE", "AREC", "PATH", "META", "LMT", "NFLX", "TM", "BABA", "INUV",
-  "BLNE", "CB", "VCX", "AVAI", "RTX", "BMY", "LIN", "ACN", "GOOG", "BYD", "PLTR", "AMZN",
+  "TSLA", "LUNR", "ASTS", "SATS", "RKLB", "RDW", "CRWV", "UUUU",
+  "APP", "PMCB", "NBIS", "NIXX", "LNG", "CRM", "YOU", "SPOT", "SOFI",
+  "MSFT", "XOM", "JPM", "ADBE", "AREC", "META", "LMT", "NFLX", "TM", "BABA", "INUV",
+  "BLNE", "CB", "AVAI", "RTX", "BMY", "LIN", "ACN", "GOOG", "BYD", "PLTR", "AMZN",
   "ORCL", "XE", "LITE", "TER", "NVDA", "SYPR", "AAPL", "MDB", "UNH", "IONQ", "COIN",
   "SMCI", "IREN", "HIMS", "AMD", "INTC", "MU", "REPL",
 ].join("\n");
@@ -93,14 +96,27 @@ type Trade = {
   exit_price: number;
   pnl: number;
   pnl_pct: number;
+  shares: number;
+  total_cost: number;
+  dollar_pnl: number;
+  entries: Array<{ time: string; price: number; shares: number; cost: number }>;
 };
 type Summary = {
   num_trades: number;
   total_pnl: number;
+  total_dollar_pnl: number;
   total_pnl_pct: number;
   win_rate: number;
+  starting_capital: number;
+  final_balance: number;
 };
-type DailyBatchSummary = Summary & { date: string };
+type DailyBatchSummary = Summary & {
+  date: string;
+  unrealized_pnl?: number;
+  position_shares?: number;
+  position_cost?: number;
+  day_close_price?: number;
+};
 type BatchAggregate = {
   overall: Summary;
   daily: DailyBatchSummary[];
@@ -123,6 +139,18 @@ type BatchRow = {
   summary?: Summary;
   error?: string;
 };
+type QuickTimeframeRow = {
+  timeframe: Timeframe;
+  status: "ok" | "error";
+  summary?: Summary;
+  daily?: DailyBatchSummary[];
+  error?: string;
+};
+type QuickBacktestResponse = {
+  symbol: string;
+  rows: QuickTimeframeRow[];
+  best_timeframe: Timeframe | null;
+};
 type BatchSortKey = "symbol" | "timeframe" | "status" | "trades" | "winRate" | "pnl" | "pnlPct";
 
 function hasTrades(summary?: Summary | null) {
@@ -131,6 +159,14 @@ function hasTrades(summary?: Summary | null) {
 
 function formatSigned(value: number, suffix = "") {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}${suffix}`;
+}
+
+function formatCurrency(value: number) {
+  return `$${value.toFixed(2)}`;
+}
+
+function formatSignedCurrency(value: number) {
+  return `${value >= 0 ? "+" : "-"}$${Math.abs(value).toFixed(2)}`;
 }
 
 function compareBatchRows(left: BatchRow, right: BatchRow, sortKey: BatchSortKey) {
@@ -349,20 +385,30 @@ function buildFallbackRsi(candles: BacktestData["candles"], period = 14): LinePo
 export default function BacktestView() {
   const [symbol, setSymbol] = useState("AAPL");
   const [timeframe, setTimeframe] = useState<Timeframe>("15m");
-  const [limit, setLimit] = useState(DEFAULT_BATCH_LIMIT);
+  const [lookbackDays, setLookbackDays] = useState(DEFAULT_LOOKBACK_DAYS);
+  const [startingCapital, setStartingCapital] = useState(10000);
+  const [positionSize, setPositionSize] = useState(1000);
+  const [maxEntries, setMaxEntries] = useState(5);
   const [symbolsText, setSymbolsText] = useState(DEFAULT_BATCH_SYMBOLS);
   const [script, setScript] = useState(DEFAULT_SCRIPT);
   const [data, setData] = useState<BacktestData | null>(null);
+  const [quickSelectedTimeframes, setQuickSelectedTimeframes] = useState<Set<Timeframe>>(
+    new Set(QUICK_TIMEFRAMES),
+  );
+  const [quickRows, setQuickRows] = useState<QuickTimeframeRow[]>([]);
+  const [activeQuickTimeframe, setActiveQuickTimeframe] = useState<Timeframe | null>(null);
   const [batchRows, setBatchRows] = useState<BatchRow[]>([]);
   const [batchAggregate, setBatchAggregate] = useState<BatchAggregate | null>(null);
   const [batchSortKey, setBatchSortKey] = useState<BatchSortKey>("pnl");
   const [batchSortDirection, setBatchSortDirection] = useState<"asc" | "desc">("desc");
+  const [activeTab, setActiveTab] = useState<"backtest" | "optimize">("backtest");
   const [loading, setLoading] = useState(false);
   const [batchLoading, setBatchLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [batchError, setBatchError] = useState<string | null>(null);
   const [scriptError, setScriptError] = useState<string | null>(null);
   const [scriptValidated, setScriptValidated] = useState(false);
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
 
   const priceContainerRef = useRef<HTMLDivElement | null>(null);
   const auxiliaryContainerRef = useRef<HTMLDivElement | null>(null);
@@ -682,25 +728,73 @@ export default function BacktestView() {
     }
   }, [data]);
 
+  async function fetchBacktestDetail(nextSymbol: string, nextTimeframe: Timeframe) {
+    const res = await fetch(`${API_BASE}/api/backtest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol: nextSymbol,
+        timeframe: nextTimeframe,
+        days: lookbackDays,
+        script,
+        starting_capital: startingCapital,
+        position_size: positionSize,
+        max_entries: maxEntries,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail ?? `HTTP ${res.status}`);
+    }
+    return (await res.json()) as BacktestData;
+  }
+
   async function runBacktest() {
     setLoading(true);
     setError(null);
+    setSelectedDate(null);
     try {
       const isValid = await validateScript();
       if (!isValid) {
         return;
       }
 
-      const res = await fetch(`${API_BASE}/api/backtest`, {
+      const selectedTimeframes = QUICK_TIMEFRAMES.filter((nextTimeframe) => quickSelectedTimeframes.has(nextTimeframe));
+      if (selectedTimeframes.length === 0) {
+        throw new Error("Select at least one quick timeframe.");
+      }
+
+      const res = await fetch(`${API_BASE}/api/backtest/quick`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol, timeframe, limit, script }),
+        body: JSON.stringify({
+          symbol,
+          timeframes: selectedTimeframes,
+          days: lookbackDays,
+          script,
+          starting_capital: startingCapital,
+          position_size: positionSize,
+          max_entries: maxEntries,
+        }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.detail ?? `HTTP ${res.status}`);
       }
-      setData(await res.json());
+
+      const body = (await res.json()) as QuickBacktestResponse;
+      setQuickRows(body.rows);
+
+      const fallbackTimeframe = body.rows.find((row) => row.status === "ok")?.timeframe ?? null;
+      const nextTimeframe = body.best_timeframe ?? fallbackTimeframe;
+      setActiveQuickTimeframe(nextTimeframe);
+
+      if (nextTimeframe) {
+        const detail = await fetchBacktestDetail(body.symbol, nextTimeframe);
+        setSymbol(body.symbol);
+        setTimeframe(nextTimeframe);
+        setData(detail);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -712,18 +806,10 @@ export default function BacktestView() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/api/backtest`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol: nextSymbol, timeframe: nextTimeframe, limit, script }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.detail ?? `HTTP ${res.status}`);
-      }
+      const detail = await fetchBacktestDetail(nextSymbol, nextTimeframe);
       setSymbol(nextSymbol);
       setTimeframe(nextTimeframe);
-      setData(await res.json());
+      setData(detail);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -748,7 +834,15 @@ export default function BacktestView() {
       const res = await fetch(`${API_BASE}/api/backtest/batch`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols, timeframes: BATCH_TIMEFRAMES, limit, script }),
+        body: JSON.stringify({
+          symbols,
+          timeframes: BATCH_TIMEFRAMES,
+          days: lookbackDays,
+          script,
+          starting_capital: startingCapital,
+          position_size: positionSize,
+          max_entries: maxEntries,
+        }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -769,6 +863,10 @@ export default function BacktestView() {
   }
 
   const summary = data?.summary;
+  const selectedQuickRow = activeQuickTimeframe
+    ? quickRows.find((row) => row.timeframe === activeQuickTimeframe) ?? null
+    : null;
+  const selectedQuickDaily = selectedQuickRow?.daily ?? [];
   const symbolHasMovement = new Map<string, boolean>();
   for (const row of batchRows) {
     const hasMovement = row.status === "error" || hasTrades(row.summary);
@@ -790,6 +888,63 @@ export default function BacktestView() {
     setBatchSortDirection(sortKey === "symbol" || sortKey === "timeframe" || sortKey === "status" ? "asc" : "desc");
   }
 
+  function toggleQuickTimeframe(nextTimeframe: Timeframe) {
+    setQuickSelectedTimeframes((current) => {
+      const next = new Set(current);
+      if (next.has(nextTimeframe)) {
+        next.delete(nextTimeframe);
+      } else {
+        next.add(nextTimeframe);
+      }
+      return next;
+    });
+  }
+
+  async function selectQuickTimeframe(row: QuickTimeframeRow) {
+    setActiveQuickTimeframe(row.timeframe);
+    setSelectedDate(null);
+    if (row.status !== "ok") {
+      return;
+    }
+    await loadBacktestDetail(symbol, row.timeframe);
+  }
+
+  function zoomToDate(date: string) {
+    if (selectedDate === date) {
+      setSelectedDate(null);
+      priceChartRef.current?.timeScale().fitContent();
+      return;
+    }
+    setSelectedDate(date);
+    if (!data) {
+      return;
+    }
+    const dayStart = Math.floor(new Date(`${date}T00:00:00Z`).getTime() / 1000) as UTCTimestamp;
+    const dayEnd = Math.floor(new Date(`${date}T23:59:59Z`).getTime() / 1000) as UTCTimestamp;
+
+    const candleTimes = data.candles.map((c) => ts(c.time));
+    let fromIndex = candleTimes.findIndex((t) => t >= dayStart);
+    let toIndex = candleTimes.length - 1;
+    for (let i = candleTimes.length - 1; i >= 0; i--) {
+      if (candleTimes[i] <= dayEnd) {
+        toIndex = i;
+        break;
+      }
+    }
+    if (fromIndex < 0) {
+      fromIndex = 0;
+    }
+    const padding = 2;
+    const range: LogicalRange = {
+      from: Math.max(0, fromIndex - padding) as Logical,
+      to: Math.min(candleTimes.length - 1, toIndex + padding) as Logical,
+    };
+    priceChartRef.current?.timeScale().setVisibleLogicalRange(range);
+    auxiliaryChartRef.current?.timeScale().setVisibleLogicalRange(range);
+    macdChartRef.current?.timeScale().setVisibleLogicalRange(range);
+    rsiChartRef.current?.timeScale().setVisibleLogicalRange(range);
+  }
+
   function renderSortLabel(label: string, sortKey: BatchSortKey) {
     if (batchSortKey !== sortKey) {
       return label;
@@ -799,24 +954,79 @@ export default function BacktestView() {
 
   return (
     <div className="backtest-shell">
-      <div className="backtest-top">
-        <div className="control-bar">
-          <label>
-            Bars
-            <input type="number" min={50} max={10000} value={limit} onChange={(event) => setLimit(Number(event.target.value))} />
-          </label>
-          <button type="button" onClick={runBatchBacktest} disabled={batchLoading || loading}>
-            {batchLoading ? "Running batch..." : "> Run selected stocks"}
-          </button>
-          <button type="button" onClick={runBacktest} disabled={loading || batchLoading}>
-            {loading ? "Loading chart..." : `> Reload chart ${symbol} ${timeframe}`}
-          </button>
-        </div>
+      <div className="tab-selector">
+        <button
+          type="button"
+          className={`tab-button ${activeTab === "backtest" ? "active" : ""}`}
+          onClick={() => setActiveTab("backtest")}
+        >
+          📊 Backtest
+        </button>
+        <button
+          type="button"
+          className={`tab-button ${activeTab === "optimize" ? "active" : ""}`}
+          onClick={() => setActiveTab("optimize")}
+        >
+          🤖 Optimize
+        </button>
+      </div>
+
+      {activeTab === "backtest" && (
+        <>
+          <div className="backtest-top">
+            <div className="control-bar">
+              <label>
+                Symbol
+                <input
+                  type="text"
+                  value={symbol}
+                  onChange={(event) => setSymbol(event.target.value.toUpperCase())}
+                  spellCheck={false}
+                />
+              </label>
+              <label>
+                Days
+                <input type="number" min={1} max={365} value={lookbackDays} onChange={(event) => setLookbackDays(Number(event.target.value))} />
+              </label>
+              <label>
+                Capital $
+                <input type="number" min={1} step={100} value={startingCapital} onChange={(event) => setStartingCapital(Number(event.target.value))} />
+              </label>
+              <label>
+                Buy Size $
+                <input type="number" min={1} step={100} value={positionSize} onChange={(event) => setPositionSize(Number(event.target.value))} />
+              </label>
+              <label>
+                Max Entries
+                <input type="number" min={1} max={100} value={maxEntries} onChange={(event) => setMaxEntries(Number(event.target.value))} />
+              </label>
+              <div className="backtest-timeframe-select">
+                <span>Quick timeframes</span>
+                <div className="timeframe-select">
+                  {QUICK_TIMEFRAMES.map((nextTimeframe) => (
+                    <label key={nextTimeframe}>
+                      <input
+                        type="checkbox"
+                        checked={quickSelectedTimeframes.has(nextTimeframe)}
+                        onChange={() => toggleQuickTimeframe(nextTimeframe)}
+                      />
+                      {nextTimeframe}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <button type="button" onClick={runBatchBacktest} disabled={batchLoading || loading}>
+                {batchLoading ? "Running batch..." : "> Run selected stocks"}
+              </button>
+              <button type="button" onClick={runBacktest} disabled={loading || batchLoading}>
+                {loading ? "Running quick backtest..." : `> Quick run ${symbol}`}
+              </button>
+            </div>
 
         <div className="backtest-stock-picker">
           <div className="backtest-stock-picker-header">
             <strong>Selected Stocks</strong>
-            <span>Runs every symbol on 5m and 15m using about one trading month of bars</span>
+            <span>Runs every symbol on 5m and 15m using {lookbackDays} trading day{lookbackDays === 1 ? "" : "s"} of history</span>
           </div>
           <textarea
             value={symbolsText}
@@ -859,8 +1069,114 @@ export default function BacktestView() {
       {error ? <p className="error-banner">{error}</p> : null}
       {batchError ? <p className="error-banner">{batchError}</p> : null}
 
+      {quickRows.length > 0 ? (
+        <div className="quick-timeframe-results">
+          <div className="quick-timeframe-header">
+            <strong>Quick run timeframes</strong>
+            <span>Click a timeframe to load that timeframe&apos;s chart and daily performance</span>
+          </div>
+          <div className="quick-timeframe-buttons">
+            {quickRows.map((row) => (
+              <button
+                key={row.timeframe}
+                type="button"
+                className={`quick-timeframe-button ${activeQuickTimeframe === row.timeframe ? "active" : ""}`}
+                onClick={() => {
+                  void selectQuickTimeframe(row);
+                }}
+              >
+                <span>{row.timeframe}</span>
+                {row.status === "ok" && row.summary ? (
+                  <strong style={{ color: hasTrades(row.summary) ? (row.summary.total_pnl >= 0 ? "#10b981" : "#ef4444") : "#94a3b8" }}>
+                    {hasTrades(row.summary) ? formatSignedCurrency(row.summary.total_pnl) : "N/A"}
+                  </strong>
+                ) : (
+                  <strong className="quick-timeframe-error">Error</strong>
+                )}
+              </button>
+            ))}
+          </div>
+          {selectedQuickRow?.status === "error" ? (
+            <p className="error-banner">{selectedQuickRow.error ?? "Backtest failed for timeframe."}</p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {selectedQuickRow && selectedQuickRow.status === "ok" ? (
+        <div className="backtest-summary">
+          <div><span>Quick Detail</span><strong>{symbol} {selectedQuickRow.timeframe}</strong></div>
+          <div><span>Start Capital</span><strong>{formatCurrency(selectedQuickRow.summary?.starting_capital ?? 0)}</strong></div>
+          <div><span>Final Equity</span><strong>{formatCurrency(selectedQuickRow.summary?.final_balance ?? 0)}</strong></div>
+          <div><span>Trades</span><strong>{selectedQuickRow.summary?.num_trades ?? 0}</strong></div>
+          <div>
+            <span>Win rate</span>
+            <strong style={{ color: hasTrades(selectedQuickRow.summary) ? "#e2e8f0" : "#94a3b8" }}>
+              {hasTrades(selectedQuickRow.summary) ? `${selectedQuickRow.summary?.win_rate ?? 0}%` : "N/A"}
+            </strong>
+          </div>
+          <div>
+            <span>Total P&amp;L</span>
+            <strong style={{ color: hasTrades(selectedQuickRow.summary) ? ((selectedQuickRow.summary?.total_pnl ?? 0) >= 0 ? "#10b981" : "#ef4444") : "#94a3b8" }}>
+              {hasTrades(selectedQuickRow.summary) ? formatSignedCurrency(selectedQuickRow.summary?.total_pnl ?? 0) : "N/A"}
+            </strong>
+          </div>
+          <div>
+            <span>Total P&amp;L %</span>
+            <strong style={{ color: hasTrades(selectedQuickRow.summary) ? ((selectedQuickRow.summary?.total_pnl_pct ?? 0) >= 0 ? "#10b981" : "#ef4444") : "#94a3b8" }}>
+              {hasTrades(selectedQuickRow.summary) ? formatSigned(selectedQuickRow.summary?.total_pnl_pct ?? 0, "%") : "N/A"}
+            </strong>
+          </div>
+        </div>
+      ) : null}
+
+      {selectedQuickRow && selectedQuickRow.status === "ok" && selectedQuickDaily.length > 0 ? (
+        <div className="backtest-trades backtest-batch-results">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Trades</th>
+                <th>Win rate</th>
+                <th>Realized P&amp;L</th>
+                <th>Unrealized P&amp;L</th>
+                <th>Position</th>
+              </tr>
+            </thead>
+            <tbody>
+              {selectedQuickDaily.map((day) => {
+                const hasUnrealized = (day.unrealized_pnl ?? 0) !== 0;
+                const hasPosition = (day.position_shares ?? 0) > 0;
+                return (
+                <tr
+                  key={`${selectedQuickRow.timeframe}-${day.date}`}
+                  className="is-clickable"
+                  data-selected={selectedDate === day.date ? "true" : undefined}
+                  onClick={() => zoomToDate(day.date)}
+                >
+                  <td>{day.date}</td>
+                  <td>{day.num_trades}</td>
+                  <td style={{ color: hasTrades(day) ? "#e2e8f0" : "#94a3b8" }}>{hasTrades(day) ? `${day.win_rate}%` : "—"}</td>
+                  <td style={{ color: hasTrades(day) ? (day.total_pnl >= 0 ? "#10b981" : "#ef4444") : "#94a3b8" }}>
+                    {hasTrades(day) ? formatSignedCurrency(day.total_pnl) : "—"}
+                  </td>
+                  <td style={{ color: hasUnrealized ? ((day.unrealized_pnl ?? 0) >= 0 ? "#10b981" : "#ef4444") : "#94a3b8" }}>
+                    {hasUnrealized ? formatSignedCurrency(day.unrealized_pnl ?? 0) : hasPosition ? "$0.00" : "—"}
+                  </td>
+                  <td style={{ color: hasPosition ? "#e2e8f0" : "#94a3b8" }}>
+                    {hasPosition ? `${(day.position_shares ?? 0).toFixed(2)} sh` : "—"}
+                  </td>
+                </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+
       {batchAggregate ? (
         <div className="backtest-summary">
+          <div><span>Batch Start</span><strong>{formatCurrency(batchAggregate.overall.starting_capital)}</strong></div>
+          <div><span>Batch Final</span><strong>{formatCurrency(batchAggregate.overall.final_balance)}</strong></div>
           <div><span>Batch Trades</span><strong>{batchAggregate.overall.num_trades}</strong></div>
           <div>
             <span>Batch Win rate</span>
@@ -871,7 +1187,7 @@ export default function BacktestView() {
           <div>
             <span>Total P&amp;L All</span>
             <strong style={{ color: hasTrades(batchAggregate.overall) ? (batchAggregate.overall.total_pnl >= 0 ? "#10b981" : "#ef4444") : "#94a3b8" }}>
-              {hasTrades(batchAggregate.overall) ? formatSigned(batchAggregate.overall.total_pnl) : "N/A"}
+              {hasTrades(batchAggregate.overall) ? formatSignedCurrency(batchAggregate.overall.total_pnl) : "N/A"}
             </strong>
           </div>
           <div>
@@ -902,7 +1218,7 @@ export default function BacktestView() {
                   <td>{day.num_trades}</td>
                   <td style={{ color: hasTrades(day) ? "#e2e8f0" : "#94a3b8" }}>{hasTrades(day) ? `${day.win_rate}%` : "N/A"}</td>
                   <td style={{ color: hasTrades(day) ? (day.total_pnl >= 0 ? "#10b981" : "#ef4444") : "#94a3b8" }}>
-                    {hasTrades(day) ? formatSigned(day.total_pnl) : "N/A"}
+                    {hasTrades(day) ? formatSignedCurrency(day.total_pnl) : "N/A"}
                   </td>
                   <td style={{ color: hasTrades(day) ? (day.total_pnl_pct >= 0 ? "#10b981" : "#ef4444") : "#94a3b8" }}>
                     {hasTrades(day) ? formatSigned(day.total_pnl_pct, "%") : "N/A"}
@@ -951,7 +1267,7 @@ export default function BacktestView() {
                       {row.summary ? (hasTrades(row.summary) ? `${row.summary.win_rate}%` : "N/A") : "-"}
                     </td>
                     <td style={{ color: hasTrades(row.summary) ? ((row.summary?.total_pnl ?? 0) >= 0 ? "#10b981" : "#ef4444") : "#94a3b8" }}>
-                      {row.summary ? (hasTrades(row.summary) ? formatSigned(row.summary.total_pnl) : "N/A") : "-"}
+                      {row.summary ? (hasTrades(row.summary) ? formatSignedCurrency(row.summary.total_pnl) : "N/A") : "-"}
                     </td>
                     <td style={{ color: hasTrades(row.summary) ? ((row.summary?.total_pnl_pct ?? 0) >= 0 ? "#10b981" : "#ef4444") : "#94a3b8" }}>
                       {row.summary ? (hasTrades(row.summary) ? formatSigned(row.summary.total_pnl_pct, "%") : "N/A") : "-"}
@@ -968,12 +1284,14 @@ export default function BacktestView() {
       {summary ? (
         <div className="backtest-summary">
           <div><span>Detail</span><strong>{symbol} {timeframe}</strong></div>
+          <div><span>Start Capital</span><strong>{formatCurrency(summary.starting_capital)}</strong></div>
+          <div><span>Final Equity</span><strong>{formatCurrency(summary.final_balance)}</strong></div>
           <div><span>Trades</span><strong>{summary.num_trades}</strong></div>
           <div><span>Win rate</span><strong>{summary.win_rate}%</strong></div>
           <div>
             <span>Total P&amp;L</span>
             <strong style={{ color: summary.total_pnl >= 0 ? "#10b981" : "#ef4444" }}>
-              {summary.total_pnl >= 0 ? "+" : ""}{summary.total_pnl.toFixed(2)}
+              {formatSignedCurrency(summary.total_pnl)}
             </strong>
           </div>
           <div>
@@ -1016,6 +1334,7 @@ export default function BacktestView() {
             <thead>
               <tr>
                 <th>Entry</th><th>Entry $</th>
+                <th>Entries</th><th>Shares</th><th>Cost $</th>
                 <th>Exit</th><th>Exit $</th>
                 <th>P&amp;L</th><th>P&amp;L %</th>
               </tr>
@@ -1025,10 +1344,13 @@ export default function BacktestView() {
                 <tr key={index}>
                   <td>{new Date(trade.entry_time).toLocaleString()}</td>
                   <td>{trade.entry_price.toFixed(2)}</td>
+                  <td>{trade.entries.length}</td>
+                  <td>{trade.shares.toFixed(4)}</td>
+                  <td>{formatCurrency(trade.total_cost)}</td>
                   <td>{new Date(trade.exit_time).toLocaleString()}</td>
                   <td>{trade.exit_price.toFixed(2)}</td>
                   <td style={{ color: trade.pnl >= 0 ? "#10b981" : "#ef4444" }}>
-                    {trade.pnl >= 0 ? "+" : ""}{trade.pnl.toFixed(2)}
+                    {formatSignedCurrency(trade.pnl)}
                   </td>
                   <td style={{ color: trade.pnl_pct >= 0 ? "#10b981" : "#ef4444" }}>
                     {trade.pnl_pct >= 0 ? "+" : ""}{trade.pnl_pct.toFixed(2)}%
@@ -1039,6 +1361,10 @@ export default function BacktestView() {
           </table>
         </div>
       ) : null}
+        </>
+      )}
+
+      {activeTab === "optimize" && <OptimizerView />}
     </div>
   );
 }

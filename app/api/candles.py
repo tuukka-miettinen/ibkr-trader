@@ -10,7 +10,7 @@ router = APIRouter(prefix="/api/candles", tags=["candles"])
 
 @router.get("", response_model=CandleSnapshot)
 def get_candles(
-    symbol: str = Query(default="AAPL", min_length=1, max_length=10),
+    symbol: str = Query(default="NBIS", min_length=1, max_length=10),
     timeframe: Timeframe = Query(default=Timeframe.ONE_MINUTE),
     limit: int = Query(default=120, ge=20, le=300),
 ) -> CandleSnapshot:

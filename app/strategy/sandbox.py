@@ -58,3 +58,31 @@ def run_user_script(script: str, candles: list[Candle]) -> list[dict]:
             k: v for k, v in item.items() if k not in ("time", "signal")
         }})
     return normalised
+
+
+# ── Tick-level script support ──────────────────────────────────────────────
+
+
+def validate_tick_script(script: str) -> None:
+    """Validate that a tick-level strategy defines ``on_tick(state)``."""
+    namespace: dict = {"ta": ta, "Candle": Candle}
+    try:
+        exec(compile(script, "<tick_strategy>", "exec"), namespace)  # noqa: S102
+    except SyntaxError as exc:
+        raise ValueError(f"Syntax error in script: {exc}") from exc
+
+    fn = namespace.get("on_tick")
+    if not callable(fn):
+        raise ValueError("Script must define a function named 'on_tick(state)'")
+
+
+def compile_tick_script(script: str) -> callable:
+    """Compile a tick-level strategy and return the ``on_tick`` function.
+
+    The ``ta`` module and ``Candle`` class are injected into the namespace.
+    """
+    validate_tick_script(script)
+
+    namespace: dict = {"ta": ta, "Candle": Candle}
+    exec(compile(script, "<tick_strategy>", "exec"), namespace)  # noqa: S102
+    return namespace["on_tick"]

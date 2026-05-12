@@ -229,6 +229,20 @@ select {
   color: #94a3b8;
 }
 
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(148, 163, 184, 0.3);
+  border-top-color: #38bdf8;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 @media (max-width: 960px) {
   .page-shell {
     padding: 18px;
@@ -319,6 +333,78 @@ select {
   color: #e2e8f0;
   padding: 12px 14px;
   font: inherit;
+}
+
+.backtest-timeframe-select {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 220px;
+}
+
+.backtest-timeframe-select > span {
+  color: #94a3b8;
+  font-size: 0.9rem;
+}
+
+.quick-timeframe-results {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(15, 23, 42, 0.78);
+}
+
+.quick-timeframe-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  color: #e2e8f0;
+}
+
+.quick-timeframe-header span {
+  color: #94a3b8;
+  font-size: 0.82rem;
+}
+
+.quick-timeframe-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.quick-timeframe-button {
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: rgba(2, 6, 23, 0.6);
+  color: #e2e8f0;
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 120px;
+  cursor: pointer;
+}
+
+.quick-timeframe-button.active {
+  border-color: #38bdf8;
+  background: rgba(56, 189, 248, 0.14);
+}
+
+.quick-timeframe-button span {
+  color: #94a3b8;
+  font-size: 0.8rem;
+}
+
+.quick-timeframe-button strong {
+  font-size: 1rem;
+}
+
+.quick-timeframe-error {
+  color: #fca5a5;
 }
 
 .strategy-editor {
@@ -451,4 +537,356 @@ select {
 
 .table-sort-button:hover {
   color: #e2e8f0;
+}
+
+/* ── Tab Selector ────────────────────────────────────────────────────────── */
+.tab-selector {
+  display: flex;
+  gap: 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  padding: 0 0 16px 0;
+  margin-bottom: 16px;
+}
+
+.tab-button {
+  padding: 10px 18px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  font-weight: 500;
+  transition: color 0.2s, border-bottom-color 0.2s;
+}
+
+.tab-button:hover {
+  color: #e2e8f0;
+}
+
+.tab-button.active {
+  color: #38bdf8;
+  border-bottom-color: #38bdf8;
+}
+
+/* ── Optimizer View ──────────────────────────────────────────────────────── */
+.optimizer-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.optimizer-form-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(15, 23, 42, 0.78);
+  border-radius: 14px;
+}
+
+.optimizer-form-section h3 {
+  margin: 0 0 8px 0;
+  color: #e2e8f0;
+  font-size: 1.2rem;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.form-group label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #cbd5e1;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.form-group input,
+.form-group select {
+  padding: 10px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(2, 6, 23, 0.8);
+  color: #e2e8f0;
+  border-radius: 8px;
+  font: inherit;
+}
+
+.form-group input:disabled,
+.form-group select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.form-group input[type="range"] {
+  padding: 0;
+  cursor: pointer;
+}
+
+.timeframe-select {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.timeframe-select label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: #cbd5e1;
+  font-weight: normal;
+}
+
+.timeframe-select input[type="checkbox"] {
+  cursor: pointer;
+  width: 18px;
+  height: 18px;
+}
+
+.optimizer-params-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 8px;
+  background: rgba(2, 6, 23, 0.4);
+}
+
+.optimizer-params-section h4 {
+  margin: 0 0 8px 0;
+  color: #cbd5e1;
+  font-size: 0.95rem;
+}
+
+.param-input {
+  display: grid;
+  grid-template-columns: 1fr 1fr repeat(3, minmax(100px, 0.8fr)) 100px;
+  gap: 8px;
+  align-items: end;
+}
+
+.param-input input,
+.param-input select {
+  padding: 8px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(2, 6, 23, 0.8);
+  color: #e2e8f0;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.btn-remove {
+  padding: 8px 12px;
+  border: none;
+  background: rgba(248, 113, 113, 0.2);
+  color: #fca5a5;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.btn-remove:hover {
+  background: rgba(248, 113, 113, 0.3);
+}
+
+.btn-add-param {
+  align-self: flex-start;
+  padding: 8px 14px;
+  border: 1px dashed rgba(148, 163, 184, 0.3);
+  background: transparent;
+  color: #94a3b8;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: border-color 0.2s, color 0.2s;
+}
+
+.btn-add-param:hover {
+  border-color: rgba(148, 163, 184, 0.5);
+  color: #e2e8f0;
+}
+
+.info-box {
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: rgba(15, 118, 110, 0.08);
+  border: 1px solid rgba(45, 212, 191, 0.14);
+  color: #a7f3d0;
+  font-size: 0.9rem;
+}
+
+.info-box strong {
+  display: block;
+  margin-bottom: 8px;
+  color: #6ee7b7;
+}
+
+.info-box ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.info-box li {
+  margin: 4px 0;
+}
+
+.error-box {
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: rgba(127, 29, 29, 0.3);
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  color: #fca5a5;
+  font-size: 0.9rem;
+}
+
+.btn-launch {
+  padding: 12px 18px;
+  border: none;
+  background: linear-gradient(135deg, #38bdf8, #f59e0b);
+  color: #020617;
+  font-weight: 700;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.95rem;
+  transition: opacity 0.2s;
+}
+
+.btn-launch:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.btn-launch:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.optimizer-results-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(15, 23, 42, 0.78);
+  border-radius: 14px;
+}
+
+.job-status {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: rgba(2, 6, 23, 0.4);
+  font-size: 0.9rem;
+  color: #cbd5e1;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: white;
+}
+
+.progress-bar {
+  height: 8px;
+  background: rgba(2, 6, 23, 0.6);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #38bdf8, #f59e0b);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.8; }
+}
+
+.optimizer-chart-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.optimizer-chart {
+  height: 300px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.leaderboard-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.leaderboard-container h4 {
+  margin: 0;
+  color: #e2e8f0;
+  font-size: 1rem;
+}
+
+.leaderboard-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.leaderboard-table th {
+  padding: 10px 14px;
+  text-align: left;
+  color: #94a3b8;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+  background: rgba(2, 6, 23, 0.4);
+}
+
+.leaderboard-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.06);
+  white-space: nowrap;
+  color: #cbd5e1;
+}
+
+.leaderboard-table tr.best-candidate {
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.leaderboard-table tr.best-candidate td {
+  color: #86efac;
+  font-weight: 500;
+}
+
+.btn-load-best {
+  align-self: flex-start;
+  padding: 10px 16px;
+  border: none;
+  background: rgba(16, 185, 129, 0.2);
+  color: #86efac;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: background 0.2s;
+}
+
+.btn-load-best:hover {
+  background: rgba(16, 185, 129, 0.3);
 }

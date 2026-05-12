@@ -1,12 +1,12 @@
 import { useEffect, useRef } from "react";
 import { ColorType, CrosshairMode, LineStyle, createChart, type IChartApi, type ISeriesApi, type LogicalRange, type UTCTimestamp } from "lightweight-charts";
 
-import type { Candle, TimelineEvent } from "../lib/types";
+import type { Candle, Timeframe, TimelineEvent } from "../lib/types";
 
 type Props = {
   candles: Candle[];
   events: TimelineEvent[];
-  timeframe: "1m" | "5m" | "15m" | "1h";
+  timeframe: Timeframe;
 };
 
 type LinePoint = {

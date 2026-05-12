@@ -7,5 +7,5 @@ router = APIRouter(prefix="/api/events", tags=["events"])
 
 
 @router.get("", response_model=list[TimelineEvent])
-def get_events(symbol: str = Query(default="AAPL", min_length=1, max_length=10)) -> list[TimelineEvent]:
+def get_events(symbol: str = Query(default="NBIS", min_length=1, max_length=10)) -> list[TimelineEvent]:
     return event_service.get_events(symbol)

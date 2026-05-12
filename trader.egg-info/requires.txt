@@ -1,0 +1,13 @@
+alembic<2.0,>=1.13
+fastapi<1.0.0,>=0.115.0
+ib-insync<1.0.0,>=0.9.86
+openai<2.0.0,>=1.0.0
+pydantic<3.0.0,>=2.9.0
+psycopg[binary]<4.0,>=3.1
+sqlalchemy<3.0.0,>=2.0.0
+uvicorn[standard]<1.0.0,>=0.32.0
+
+[dev]
+httpx<1.0.0,>=0.28.0
+pytest<9.0.0,>=8.3.0
+pytest-asyncio<1.0.0,>=0.23.0
