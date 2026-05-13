@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 
+import MiniSymbolChart, { type MiniCandle } from "./MiniSymbolChart";
 import type {
   Algorithm,
   LiveSession,
@@ -60,6 +61,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
     total_value: number | null;
   } | null>(null);
   const [trades, setTrades] = useState<LiveTrade[]>([]);
+  const [symbolCandles, setSymbolCandles] = useState<Record<string, MiniCandle[]>>({});
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
@@ -198,14 +200,59 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
         fetch(`${API_BASE}/api/live/sessions/${sessionId}`),
         fetch(`${API_BASE}/api/live/sessions/${sessionId}/trades`),
       ]);
+      let symbols: LiveSessionSymbol[] = [];
       if (detailRes.ok) {
         const data = await detailRes.json();
         setSessionDetail(data);
+        symbols = data.symbols ?? [];
       }
       if (tradesRes.ok) {
         const data = await tradesRes.json();
         setTrades(data.trades ?? []);
       }
+      // Fetch candles for each symbol: historical 1m candles + any live aggregator candles
+      const candleMap: Record<string, MiniCandle[]> = {};
+      await Promise.all(
+        symbols.map(async (s) => {
+          try {
+            // Fetch historical 1m candles
+            const [histRes, liveRes] = await Promise.all([
+              fetch(`${API_BASE}/api/candles?symbol=${s.symbol}&timeframe=1m&limit=120`),
+              fetch(`${API_BASE}/api/live/sessions/${sessionId}/candles/${s.symbol}`),
+            ]);
+            const histCandles: MiniCandle[] = [];
+            if (histRes.ok) {
+              const data = await histRes.json();
+              for (const c of data.candles ?? []) {
+                histCandles.push({
+                  time: c.time,
+                  open: c.open,
+                  high: c.high,
+                  low: c.low,
+                  close: c.close,
+                  volume: c.volume,
+                });
+              }
+            }
+            // Live aggregator candles (from session runtime)
+            let liveCandles: MiniCandle[] = [];
+            if (liveRes.ok) {
+              const data = await liveRes.json();
+              liveCandles = data.candles ?? [];
+            }
+            // Merge: use historical as base, append any live candles with timestamps beyond the last historical
+            const lastHistTime = histCandles.length > 0 ? histCandles[histCandles.length - 1].time : "";
+            const merged = [...histCandles];
+            for (const lc of liveCandles) {
+              if (lc.time > lastHistTime) {
+                merged.push(lc);
+              }
+            }
+            candleMap[s.symbol] = merged;
+          } catch { /* ignore */ }
+        }),
+      );
+      setSymbolCandles(candleMap);
     } catch { /* ignore */ }
   }
 
@@ -216,6 +263,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
     } else {
       setSessionDetail(null);
       setTrades([]);
+      setSymbolCandles({});
     }
   }, [activeSessionId]);
 
@@ -279,6 +327,14 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
               ),
             };
           });
+          return;
+        }
+
+        if (evt.type === "candle") {
+          setSymbolCandles((prev) => ({
+            ...prev,
+            [evt.symbol]: [...(prev[evt.symbol] ?? []), evt.candle],
+          }));
           return;
         }
 
@@ -626,8 +682,8 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
             </div>
           )}
 
-          {/* Symbol cards */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: "0.75rem", marginBottom: "0.75rem" }}>
+          {/* Symbol cards with charts */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "0.75rem", marginBottom: "0.75rem" }}>
             {sessionDetail.symbols.map((s) => {
               const unrealized = s.unrealized_pnl ?? 0;
               const realized = s.realized_pnl ?? 0;
@@ -649,7 +705,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                       {s.last_price != null ? fmt$(s.last_price) : "—"}
                     </span>
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.25rem 1rem", fontSize: "0.8rem" }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.25rem 1rem", fontSize: "0.8rem", marginBottom: "0.5rem" }}>
                     <div>
                       <span style={{ color: "#64748b" }}>Position</span>
                       <div style={{ fontWeight: 600 }}>
@@ -689,6 +745,11 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                       </div>
                     )}
                   </div>
+                  <MiniSymbolChart
+                    candles={symbolCandles[s.symbol] ?? []}
+                    trades={trades}
+                    symbol={s.symbol}
+                  />
                 </div>
               );
             })}

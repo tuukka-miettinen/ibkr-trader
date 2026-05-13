@@ -299,6 +299,22 @@ class LiveTradingEngine:
         # Push through aggregator
         closed = rt.aggregator.push(candle)
 
+        # Broadcast closed 1m candle for charts
+        closed_1m = closed.get(Timeframe.ONE_MINUTE)
+        if closed_1m:
+            await self._broadcast(session_id, {
+                "type": "candle",
+                "symbol": symbol,
+                "candle": {
+                    "time": closed_1m.time.isoformat() if hasattr(closed_1m.time, "isoformat") else str(closed_1m.time),
+                    "open": closed_1m.open,
+                    "high": closed_1m.high,
+                    "low": closed_1m.low,
+                    "close": closed_1m.close,
+                    "volume": closed_1m.volume,
+                },
+            })
+
         # Build position info (same as backtest)
         position_info = None
         if rt.position_shares > 0:

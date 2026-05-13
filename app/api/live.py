@@ -290,6 +290,45 @@ async def clone_session(session_id: str) -> dict:
 
 # ── WebSocket — real-time session stream ─────────────────────────────
 
+
+@router.get("/sessions/{session_id}/candles/{symbol}")
+async def get_session_candles(session_id: str, symbol: str) -> dict:
+    """Return aggregated 1m candles for a running session's symbol."""
+    state = live_engine._sessions.get(session_id)  # noqa: SLF001
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not running")
+    rt = state["symbols"].get(symbol.upper())
+    if rt is None:
+        raise HTTPException(status_code=404, detail="Symbol not in session")
+
+    from app.models.market_data import Timeframe
+    completed = rt.aggregator.completed_candles(Timeframe.ONE_MINUTE)
+    current = rt.aggregator.current_candle(Timeframe.ONE_MINUTE)
+
+    candles_out = [
+        {
+            "time": c.time.isoformat() if hasattr(c.time, "isoformat") else str(c.time),
+            "open": c.open,
+            "high": c.high,
+            "low": c.low,
+            "close": c.close,
+            "volume": c.volume,
+        }
+        for c in completed
+    ]
+    if current:
+        candles_out.append({
+            "time": current.time.isoformat() if hasattr(current.time, "isoformat") else str(current.time),
+            "open": current.open,
+            "high": current.high,
+            "low": current.low,
+            "close": current.close,
+            "volume": current.volume,
+        })
+
+    return {"symbol": symbol.upper(), "candles": candles_out}
+
+
 @router.websocket("/ws/{session_id}")
 async def live_ws(websocket: WebSocket, session_id: str) -> None:
     """Stream real-time events for a live session."""
