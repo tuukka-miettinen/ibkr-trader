@@ -216,46 +216,75 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
                 lookback_days=body.days,
             )
 
-        # Build price series with VWAP per trading day (sampled every 12th tick ≈ 1 min)
+        # Build 1-minute OHLCV candles with VWAP per trading day
         def _trading_date_str(candle) -> str:
             d = candle.time.date()
             if candle.time.hour < 8:
                 d = d - timedelta(days=1)
             return d.isoformat()
 
-        price_by_day: dict[str, list] = defaultdict(list)
+        candles_by_day: dict[str, list] = defaultdict(list)
         vwap_state: dict[str, dict] = {}  # cum_vp, cum_vol per day
         tick_idx_by_day: dict[str, int] = defaultdict(int)
-        last_tick_by_day: dict[str, tuple] = {}  # day → (tick, vwap_val) for flushing
+
+        # Group ticks into 1-minute bars
+        bar_state: dict[str, dict] = {}  # day → current bar accumulator
 
         for t in ticks:
             day = _trading_date_str(t)
             tick_idx_by_day[day] += 1
+
+            # VWAP accumulator
             tp = (t.high + t.low + t.close) / 3.0
             st = vwap_state.setdefault(day, {"cum_vp": 0.0, "cum_vol": 0})
             st["cum_vp"] += tp * t.volume
             st["cum_vol"] += t.volume
 
-            vwap_val = st["cum_vp"] / st["cum_vol"] if st["cum_vol"] > 0 else t.close
-            last_tick_by_day[day] = (t, vwap_val)
+            # Truncate tick time to the minute for bar grouping
+            bar_minute = t.time.replace(second=0, microsecond=0)
+            bar_key = bar_minute.isoformat()
 
-            if tick_idx_by_day[day] % 12 == 0:
-                price_by_day[day].append({
-                    "t": t.time.isoformat(),
-                    "p": round(t.close, 4),
-                    "v": round(vwap_val, 4),
-                })
+            cur = bar_state.get(day)
+            if cur is None or cur["key"] != bar_key:
+                # Close the previous bar (if any)
+                if cur is not None:
+                    vwap_at_close = cur["cum_vp"] / cur["cum_vol"] if cur["cum_vol"] > 0 else cur["c"]
+                    candles_by_day[day].append({
+                        "t": cur["key"],
+                        "o": round(cur["o"], 4),
+                        "h": round(cur["h"], 4),
+                        "l": round(cur["l"], 4),
+                        "c": round(cur["c"], 4),
+                        "v": round(vwap_at_close, 4),
+                    })
+                # Start a new bar
+                bar_state[day] = {
+                    "key": bar_key,
+                    "o": t.open,
+                    "h": t.high,
+                    "l": t.low,
+                    "c": t.close,
+                    "cum_vp": st["cum_vp"],
+                    "cum_vol": st["cum_vol"],
+                }
+            else:
+                cur["h"] = max(cur["h"], t.high)
+                cur["l"] = min(cur["l"], t.low)
+                cur["c"] = t.close
+                cur["cum_vp"] = st["cum_vp"]
+                cur["cum_vol"] = st["cum_vol"]
 
-        # Flush the last data point for each day so partial days always
-        # have chart data and full days don't lose their trailing ticks.
-        for day, (last_t, last_vwap) in last_tick_by_day.items():
-            count = tick_idx_by_day[day]
-            if count % 12 != 0:  # trailing ticks not yet emitted
-                price_by_day[day].append({
-                    "t": last_t.time.isoformat(),
-                    "p": round(last_t.close, 4),
-                    "v": round(last_vwap, 4),
-                })
+        # Flush the last open bar for each day
+        for day, cur in bar_state.items():
+            vwap_at_close = cur["cum_vp"] / cur["cum_vol"] if cur["cum_vol"] > 0 else cur["c"]
+            candles_by_day[day].append({
+                "t": cur["key"],
+                "o": round(cur["o"], 4),
+                "h": round(cur["h"], 4),
+                "l": round(cur["l"], 4),
+                "c": round(cur["c"], 4),
+                "v": round(vwap_at_close, 4),
+            })
 
         # Tick counts per day so the frontend can flag partial days
         ticks_per_day = dict(tick_idx_by_day)
@@ -274,6 +303,9 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
                 "entries": trade.entries,
             })
 
+        # Open position entries (buys with no corresponding sell yet)
+        open_entries_data = result.open_entries
+
         # Final result event
         yield _sse({
             "stage": "done",
@@ -286,7 +318,8 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
                 "run": {"id": run.id},
                 "tick_count": len(ticks),
                 "trades": trades_data,
-                "price_series": dict(price_by_day),
+                "open_entries": open_entries_data,
+                "price_series": dict(candles_by_day),
                 "ticks_per_day": ticks_per_day,
                 **result_data,
             },

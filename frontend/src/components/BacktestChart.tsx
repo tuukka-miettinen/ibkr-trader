@@ -2,12 +2,13 @@ import { useEffect, useRef } from "react";
 import {
   ColorType,
   CrosshairMode,
+  LineStyle,
   createChart,
   type IChartApi,
   type UTCTimestamp,
 } from "lightweight-charts";
 
-export type PricePoint = { t: string; p: number; v: number };
+export type PricePoint = { t: string; o: number; h: number; l: number; c: number; v: number };
 export type TradeEntry = { time: string; price: number; shares: number; cost: number };
 export type TradeData = {
   entry_time: string;
@@ -24,10 +25,18 @@ type Props = {
   priceData: PricePoint[];
   trades: TradeData[];
   selectedDate: string;
+  openEntries?: TradeEntry[];
 };
 
 function toTs(iso: string): UTCTimestamp {
   return Math.floor(new Date(iso).getTime() / 1000) as UTCTimestamp;
+}
+
+/** Snap an ISO timestamp down to the start of its minute. */
+function snapToMinute(iso: string): UTCTimestamp {
+  const d = new Date(iso);
+  d.setUTCSeconds(0, 0);
+  return Math.floor(d.getTime() / 1000) as UTCTimestamp;
 }
 
 function tradingDate(isoTime: string): string {
@@ -38,23 +47,50 @@ function tradingDate(isoTime: string): string {
   return d.toISOString().slice(0, 10);
 }
 
-export default function BacktestChart({ priceData, trades, selectedDate }: Props) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
+function buildRsi(closes: number[], period = 14): (number | null)[] {
+  const result: (number | null)[] = Array(closes.length).fill(null);
+  if (closes.length <= period) return result;
+
+  let avgGain = 0;
+  let avgLoss = 0;
+  for (let i = 1; i <= period; i++) {
+    const delta = closes[i] - closes[i - 1];
+    avgGain += Math.max(delta, 0);
+    avgLoss += Math.max(-delta, 0);
+  }
+  avgGain /= period;
+  avgLoss /= period;
+
+  result[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+
+  for (let i = period + 1; i < closes.length; i++) {
+    const delta = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + Math.max(delta, 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + Math.max(-delta, 0)) / period;
+    result[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  }
+  return result;
+}
+
+export default function BacktestChart({ priceData, trades, selectedDate, openEntries = [] }: Props) {
+  const priceContainerRef = useRef<HTMLDivElement>(null);
+  const rsiContainerRef = useRef<HTMLDivElement>(null);
+  const priceChartRef = useRef<IChartApi | null>(null);
+  const rsiChartRef = useRef<IChartApi | null>(null);
 
   useEffect(() => {
-    if (!containerRef.current || priceData.length === 0) return;
+    if (!priceContainerRef.current || !rsiContainerRef.current || priceData.length === 0) return;
 
-    if (chartRef.current) {
-      chartRef.current.remove();
-      chartRef.current = null;
-    }
+    // Tear down previous charts
+    if (priceChartRef.current) { priceChartRef.current.remove(); priceChartRef.current = null; }
+    if (rsiChartRef.current) { rsiChartRef.current.remove(); rsiChartRef.current = null; }
 
-    const chart = createChart(containerRef.current, {
-      width: containerRef.current.clientWidth,
-      height: 300,
+    const width = priceContainerRef.current.clientWidth;
+
+    const chartOpts = {
+      width,
       layout: {
-        background: { type: ColorType.Solid, color: "transparent" },
+        background: { type: ColorType.Solid as const, color: "transparent" },
         textColor: "#94a3b8",
         fontSize: 11,
       },
@@ -68,77 +104,62 @@ export default function BacktestChart({ priceData, trades, selectedDate }: Props
         secondsVisible: false,
         borderColor: "rgba(148,163,184,0.15)",
       },
-      rightPriceScale: {
-        borderColor: "rgba(148,163,184,0.15)",
-      },
-    });
-    chartRef.current = chart;
+      rightPriceScale: { borderColor: "rgba(148,163,184,0.15)" },
+    };
 
-    // Collect trade timestamps that fall on this day so we can inject
-    // them into the price series.  lightweight-charts silently drops
-    // markers whose timestamp doesn't exist in the series data.
-    const tradePoints: Map<number, number> = new Map(); // ts → price
-    for (const trade of trades) {
-      for (const entry of trade.entries) {
-        if (entry.time.slice(0, 10) === selectedDate || tradingDate(entry.time) === selectedDate) {
-          tradePoints.set(toTs(entry.time) as number, entry.price);
-        }
-      }
-      if (trade.exit_time.slice(0, 10) === selectedDate || tradingDate(trade.exit_time) === selectedDate) {
-        tradePoints.set(toTs(trade.exit_time) as number, trade.exit_price);
-      }
-    }
+    // ── Price chart ──────────────────────────────────────────────────
+    const priceChart = createChart(priceContainerRef.current, { ...chartOpts, height: 260 });
+    priceChartRef.current = priceChart;
 
-    // Build merged price + VWAP arrays, injecting trade-time points
-    const priceMap = new Map<number, { p: number; v: number }>();
-    for (const pt of priceData) {
-      priceMap.set(toTs(pt.t) as number, { p: pt.p, v: pt.v });
-    }
+    // Build a set of candle timestamps for snapping trade markers
+    const candleTsSet = new Set(priceData.map((p) => toTs(p.t) as number));
 
-    // Add trade points that are missing from the sampled series
-    for (const [ts, price] of tradePoints) {
-      if (!priceMap.has(ts)) {
-        // Find nearest VWAP value for interpolation
-        let nearestVwap = price;
-        let bestDist = Infinity;
-        for (const pt of priceData) {
-          const d = Math.abs((toTs(pt.t) as number) - ts);
-          if (d < bestDist) {
-            bestDist = d;
-            nearestVwap = pt.v;
-          }
-        }
-        priceMap.set(ts, { p: price, v: nearestVwap });
-      }
-    }
-
-    // Sort by time
-    const mergedTimes = [...priceMap.keys()].sort((a, b) => a - b);
-    const mergedPrice = mergedTimes.map((ts) => ({ time: ts as UTCTimestamp, value: priceMap.get(ts)!.p }));
-    const mergedVwap = mergedTimes.map((ts) => ({ time: ts as UTCTimestamp, value: priceMap.get(ts)!.v }));
-
-    // Price line
-    const priceSeries = chart.addLineSeries({
-      color: "#38bdf8",
-      lineWidth: 1,
+    // Candlestick series
+    const candleSeries = priceChart.addCandlestickSeries({
+      upColor: "#10b981",
+      downColor: "#ef4444",
+      borderUpColor: "#10b981",
+      borderDownColor: "#ef4444",
+      wickUpColor: "#10b981",
+      wickDownColor: "#ef4444",
       priceLineVisible: false,
       lastValueVisible: false,
-      title: "Price",
     });
-    priceSeries.setData(mergedPrice);
+    candleSeries.setData(
+      priceData.map((p) => ({
+        time: toTs(p.t),
+        open: p.o,
+        high: p.h,
+        low: p.l,
+        close: p.c,
+      })),
+    );
 
-    // VWAP line
-    const vwapSeries = chart.addLineSeries({
+    // VWAP overlay
+    const vwapSeries = priceChart.addLineSeries({
       color: "#f59e0b",
       lineWidth: 1,
-      lineStyle: 2, // Dashed
+      lineStyle: LineStyle.Dashed,
       priceLineVisible: false,
       lastValueVisible: false,
       title: "VWAP",
     });
-    vwapSeries.setData(mergedVwap);
+    vwapSeries.setData(priceData.map((p) => ({ time: toTs(p.t), value: p.v })));
 
-    // Buy / Sell markers on the price series
+    // ── Trade markers ────────────────────────────────────────────────
+    // Snap trade times to the nearest candle minute so markers render
+    function nearestCandleTs(tradeIso: string): UTCTimestamp {
+      const snapped = snapToMinute(tradeIso) as number;
+      if (candleTsSet.has(snapped)) return snapped as UTCTimestamp;
+      let best = snapped;
+      let bestDist = Infinity;
+      for (const ts of candleTsSet) {
+        const d = Math.abs(ts - snapped);
+        if (d < bestDist) { bestDist = d; best = ts; }
+      }
+      return best as UTCTimestamp;
+    }
+
     const markers: Array<{
       time: UTCTimestamp;
       position: "belowBar" | "aboveBar";
@@ -151,7 +172,7 @@ export default function BacktestChart({ priceData, trades, selectedDate }: Props
       for (const entry of trade.entries) {
         if (entry.time.slice(0, 10) === selectedDate || tradingDate(entry.time) === selectedDate) {
           markers.push({
-            time: toTs(entry.time),
+            time: nearestCandleTs(entry.time),
             position: "belowBar",
             color: "#10b981",
             shape: "arrowUp",
@@ -161,7 +182,7 @@ export default function BacktestChart({ priceData, trades, selectedDate }: Props
       }
       if (trade.exit_time.slice(0, 10) === selectedDate || tradingDate(trade.exit_time) === selectedDate) {
         markers.push({
-          time: toTs(trade.exit_time),
+          time: nearestCandleTs(trade.exit_time),
           position: "aboveBar",
           color: "#ef4444",
           shape: "arrowDown",
@@ -169,34 +190,128 @@ export default function BacktestChart({ priceData, trades, selectedDate }: Props
         });
       }
     }
-
-    markers.sort((a, b) => (a.time as number) - (b.time as number));
-    if (markers.length > 0) {
-      priceSeries.setMarkers(markers);
+    // Buy markers for open position entries (buys with no sell yet)
+    for (const entry of openEntries) {
+      if (entry.time.slice(0, 10) === selectedDate || tradingDate(entry.time) === selectedDate) {
+        markers.push({
+          time: nearestCandleTs(entry.time),
+          position: "belowBar",
+          color: "#10b981",
+          shape: "arrowUp",
+          text: `B $${entry.price.toFixed(2)}`,
+        });
+      }
     }
 
-    chart.timeScale().fitContent();
+    markers.sort((a, b) => (a.time as number) - (b.time as number));
+    if (markers.length > 0) candleSeries.setMarkers(markers);
 
-    const observer = new ResizeObserver((entries) => {
-      for (const e of entries) {
-        chart.applyOptions({ width: e.contentRect.width });
+    // ── RSI chart ────────────────────────────────────────────────────
+    const rsiChart = createChart(rsiContainerRef.current, { ...chartOpts, height: 100 });
+    rsiChartRef.current = rsiChart;
+
+    const closes = priceData.map((p) => p.c);
+    const rsiValues = buildRsi(closes, 14);
+
+    const rsiSeries = rsiChart.addLineSeries({
+      color: "#a78bfa",
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      title: "RSI 14",
+    });
+    const rsiData = priceData
+      .map((p, i) => rsiValues[i] !== null ? { time: toTs(p.t), value: rsiValues[i]! } : null)
+      .filter(Boolean) as { time: UTCTimestamp; value: number }[];
+    rsiSeries.setData(rsiData);
+
+    // RSI reference lines at 30 and 70
+    rsiSeries.createPriceLine({ price: 70, color: "rgba(239,68,68,0.4)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "" });
+    rsiSeries.createPriceLine({ price: 30, color: "rgba(16,185,129,0.4)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "" });
+
+    // Fix RSI scale to 0-100
+    rsiChart.priceScale("right").applyOptions({ autoScale: false, scaleMargins: { top: 0.05, bottom: 0.05 } });
+    rsiSeries.applyOptions({ autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 100 } }) });
+
+    // Invisible series with a point at every candle timestamp so logical indices match the price chart
+    const anchorSeries = rsiChart.addLineSeries({
+      priceLineVisible: false,
+      lastValueVisible: false,
+      visible: false,
+    });
+    anchorSeries.setData(priceData.map((p) => ({ time: toTs(p.t), value: 0 })));
+
+    // ── Sync crosshairs & time scales ────────────────────────────────
+    let syncing = false;
+
+    priceChart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+      if (syncing || !range) return;
+      syncing = true;
+      rsiChart.timeScale().setVisibleLogicalRange(range);
+      syncing = false;
+    });
+    rsiChart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+      if (syncing || !range) return;
+      syncing = true;
+      priceChart.timeScale().setVisibleLogicalRange(range);
+      syncing = false;
+    });
+
+    priceChart.subscribeCrosshairMove((param) => {
+      if (!param || !param.time) {
+        rsiChart.clearCrosshairPosition();
+        return;
+      }
+      const point = rsiData.find((d) => (d.time as number) === (param.time as number));
+      if (point) {
+        rsiChart.setCrosshairPosition(point.value, point.time, rsiSeries);
       }
     });
-    observer.observe(containerRef.current);
+    rsiChart.subscribeCrosshairMove((param) => {
+      if (!param || !param.time) {
+        priceChart.clearCrosshairPosition();
+        return;
+      }
+      const idx = priceData.findIndex((p) => (toTs(p.t) as number) === (param.time as number));
+      if (idx >= 0) {
+        priceChart.setCrosshairPosition(priceData[idx].c, toTs(priceData[idx].t), candleSeries);
+      }
+    });
+
+    priceChart.timeScale().fitContent();
+    rsiChart.timeScale().fitContent();
+
+    // ── Resize observer ──────────────────────────────────────────────
+    const observer = new ResizeObserver((entries) => {
+      for (const e of entries) {
+        const w = e.contentRect.width;
+        priceChart.applyOptions({ width: w });
+        rsiChart.applyOptions({ width: w });
+      }
+    });
+    observer.observe(priceContainerRef.current);
 
     return () => {
       observer.disconnect();
-      chart.remove();
-      chartRef.current = null;
+      priceChart.remove();
+      rsiChart.remove();
+      priceChartRef.current = null;
+      rsiChartRef.current = null;
     };
   }, [priceData, trades, selectedDate]);
 
   if (priceData.length === 0) return null;
 
   return (
-    <div
-      ref={containerRef}
-      style={{ width: "100%", height: 300, borderRadius: "8px", overflow: "hidden" }}
-    />
+    <div style={{ width: "100%" }}>
+      <div
+        ref={priceContainerRef}
+        style={{ width: "100%", height: 260, borderRadius: "8px 8px 0 0", overflow: "hidden" }}
+      />
+      <div
+        ref={rsiContainerRef}
+        style={{ width: "100%", height: 100, borderRadius: "0 0 8px 8px", overflow: "hidden", borderTop: "1px solid rgba(148,163,184,0.1)" }}
+      />
+    </div>
   );
 }

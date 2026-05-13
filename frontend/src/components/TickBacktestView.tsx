@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import Editor from "@monaco-editor/react";
 
 import type { Algorithm, BacktestRunSummary } from "../lib/types";
-import BacktestChart, { type PricePoint, type TradeData } from "./BacktestChart";
+import BacktestChart, { type PricePoint, type TradeData, type TradeEntry } from "./BacktestChart";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
@@ -113,6 +113,7 @@ export default function TickBacktestView() {
     summary: Record<string, number>;
     daily: DailySummary[];
     trades: TradeData[];
+    open_entries?: TradeEntry[];
     price_series: Record<string, PricePoint[]>;
     ticks_per_day?: Record<string, number>;
   } | null>(null);
@@ -554,6 +555,7 @@ export default function TickBacktestView() {
               <BacktestChart
                 priceData={runResult.price_series[chartDay]}
                 trades={runResult.trades}
+                openEntries={runResult.open_entries}
                 selectedDate={chartDay}
               />
             </div>

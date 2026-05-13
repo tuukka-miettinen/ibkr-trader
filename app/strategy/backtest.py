@@ -52,6 +52,7 @@ class BacktestResult:
     starting_capital: float = 10000.0
     final_balance: float = 10000.0
     total_dollar_pnl: float = 0.0
+    open_entries: list[dict] = field(default_factory=list)
 
 
 def _normalize_config(config: BacktestConfig | None) -> BacktestConfig:

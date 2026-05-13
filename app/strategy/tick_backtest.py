@@ -364,4 +364,5 @@ def run_tick_backtest(
         starting_capital=round(base_config.starting_capital, 4),
         final_balance=final_balance,
         total_dollar_pnl=total_pnl,
+        open_entries=position_entries.copy(),
     )
