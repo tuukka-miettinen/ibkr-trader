@@ -99,6 +99,9 @@ export default function TickBacktestView() {
   const [startingCapital, setStartingCapital] = useState(10000);
   const [positionSize, setPositionSize] = useState(1000);
   const [maxEntries, setMaxEntries] = useState(5);
+  const [feePerShare, setFeePerShare] = useState(0.005);
+  const [feeMinOrder, setFeeMinOrder] = useState(1.00);
+  const [feeMaxPct, setFeeMaxPct] = useState(1.0);
   const [extended, setExtended] = useState(true);
 
   const [dataStatus, setDataStatus] = useState<DataStatus | null>(null);
@@ -156,6 +159,9 @@ export default function TickBacktestView() {
           starting_capital: startingCapital,
           position_size: positionSize,
           max_entries: maxEntries,
+          fee_per_share: feePerShare,
+          fee_min_order: feeMinOrder,
+          fee_max_pct: feeMaxPct,
           candle_timeframes: ["1m", "5m", "15m"],
         }),
       });
@@ -434,6 +440,18 @@ export default function TickBacktestView() {
                 Max Entries
                 <input type="number" min={1} max={100} value={maxEntries} onChange={(e) => setMaxEntries(Number(e.target.value))} />
               </label>
+              <label>
+                Fee/Share $
+                <input type="number" min={0} step={0.001} value={feePerShare} onChange={(e) => setFeePerShare(Number(e.target.value))} />
+              </label>
+              <label>
+                Fee Min $
+                <input type="number" min={0} step={0.1} value={feeMinOrder} onChange={(e) => setFeeMinOrder(Number(e.target.value))} />
+              </label>
+              <label>
+                Fee Max %
+                <input type="number" min={0} max={10} step={0.1} value={feeMaxPct} onChange={(e) => setFeeMaxPct(Number(e.target.value))} />
+              </label>
             </div>
           </div>
 
@@ -466,6 +484,9 @@ export default function TickBacktestView() {
                 </strong>
               </div>
               <div><span>Final Balance</span><strong>{formatCurrency(summary.final_balance)}</strong></div>
+              {summary.total_fees > 0 && (
+                <div><span>Total Fees</span><strong style={{ color: "#f59e0b" }}>{formatCurrency(summary.total_fees)}</strong></div>
+              )}
             </div>
           )}
 

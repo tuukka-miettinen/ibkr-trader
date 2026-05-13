@@ -175,6 +175,19 @@ class TickBacktestConfig(BacktestConfig):
         Timeframe.FIVE_MINUTES,
         Timeframe.FIFTEEN_MINUTES,
     ])
+    fee_per_share: float = 0.005   # IBKR Fixed: USD per share
+    fee_min_order: float = 1.00    # IBKR Fixed: minimum per order
+    fee_max_pct: float = 1.0       # IBKR Fixed: max 1% of trade value
+
+
+def _calc_commission(shares: float, trade_value: float, per_share: float, min_order: float, max_pct: float) -> float:
+    """Calculate IBKR-style commission: per-share with min/max per order."""
+    if per_share <= 0:
+        return 0.0
+    raw = shares * per_share
+    fee = max(raw, min_order)
+    cap = trade_value * max_pct / 100.0
+    return min(fee, cap)
 
 
 def run_tick_backtest(
@@ -203,6 +216,7 @@ def run_tick_backtest(
     position_entries: list[dict] = []
     position_shares = 0.0
     position_cost = 0.0
+    total_fees = 0.0
     strategy_state: dict = {}  # persistent state shared across all ticks
 
     current_date: str | None = None
@@ -307,7 +321,9 @@ def run_tick_backtest(
             ):
                 shares = buy_amount / tick.close
                 cost = shares * tick.close
-                cash -= cost
+                fee = _calc_commission(shares, cost, resolved.fee_per_share, resolved.fee_min_order, resolved.fee_max_pct)
+                cash -= cost + fee
+                total_fees += fee
                 position_cost += cost
                 position_shares += shares
                 position_entries.append({
@@ -319,6 +335,9 @@ def run_tick_backtest(
                 day_buys += 1
         elif signal == "sell" and position_shares > 0:
             proceeds = position_shares * tick.close
+            fee = _calc_commission(position_shares, proceeds, resolved.fee_per_share, resolved.fee_min_order, resolved.fee_max_pct)
+            proceeds -= fee
+            total_fees += fee
             dollar_pnl = proceeds - position_cost
             avg_entry_price = position_cost / position_shares
             pnl_pct = dollar_pnl / position_cost * 100 if position_cost else 0.0
@@ -365,4 +384,5 @@ def run_tick_backtest(
         final_balance=final_balance,
         total_dollar_pnl=total_pnl,
         open_entries=position_entries.copy(),
+        total_fees=round(total_fees, 4),
     )

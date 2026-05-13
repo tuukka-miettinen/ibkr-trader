@@ -87,6 +87,9 @@ class RunTickBacktestRequest(BaseModel):
         Timeframe.FIVE_MINUTES,
         Timeframe.FIFTEEN_MINUTES,
     ])
+    fee_per_share: float = Field(default=0.005, ge=0, description="USD per share (IBKR Fixed default: 0.005)")
+    fee_min_order: float = Field(default=1.00, ge=0, description="Minimum commission per order (IBKR Fixed default: 1.00)")
+    fee_max_pct: float = Field(default=1.0, ge=0, le=10, description="Maximum commission as % of trade value (IBKR Fixed default: 1%)")
 
 
 @router.post("/fetch")
@@ -160,6 +163,9 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
             position_size=body.position_size,
             max_entries=body.max_entries,
             candle_timeframes=body.candle_timeframes,
+            fee_per_share=body.fee_per_share,
+            fee_min_order=body.fee_min_order,
+            fee_max_pct=body.fee_max_pct,
         )
 
         # Run backtest in thread, poll queue for progress

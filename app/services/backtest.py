@@ -194,6 +194,7 @@ def summarize_result(result: bt.BacktestResult) -> dict:
         "win_rate": result.win_rate,
         "starting_capital": result.starting_capital,
         "final_balance": result.final_balance,
+        "total_fees": result.total_fees,
     }
 
 
