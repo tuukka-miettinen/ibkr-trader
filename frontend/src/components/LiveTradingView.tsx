@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useLocation } from "wouter";
 
 import type {
   Algorithm,
@@ -30,10 +31,11 @@ function pnlColor(v: number) {
 // Component
 // ────────────────────────────────────────────────────────────────────
 
-export default function LiveTradingView() {
+export default function LiveTradingView({ initialSessionId }: { initialSessionId?: string } = {}) {
+  const [, navigate] = useLocation();
   // ── State: session list ──
   const [sessions, setSessions] = useState<LiveSession[]>([]);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const activeSessionId = initialSessionId ?? null;
 
   // ── State: create form ──
   const [showCreate, setShowCreate] = useState(false);
@@ -137,7 +139,7 @@ export default function LiveTradingView() {
       const data = await res.json();
       setShowCreate(false);
       await refreshSessions();
-      setActiveSessionId(data.session.id);
+      navigate(`/paper-trading/${data.session.id}`);
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -161,6 +163,27 @@ export default function LiveTradingView() {
       if (activeSessionId === sessionId) {
         await loadSessionDetail(sessionId);
       }
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  async function cloneSession(sessionId: string) {
+    setActionLoading(true);
+    setActionError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/live/sessions/${sessionId}/clone`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.detail || "Failed to clone session");
+      }
+      const data = await res.json();
+      await refreshSessions();
+      navigate(`/paper-trading/${data.session.id}`);
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -318,7 +341,7 @@ export default function LiveTradingView() {
         <h2 style={{ margin: 0, fontSize: "1.1rem" }}>Paper Trading</h2>
         <div style={{ display: "flex", gap: "0.5rem" }}>
           {activeSessionId && (
-            <button type="button" onClick={() => setActiveSessionId(null)} style={{ fontSize: "0.8rem" }}>
+            <button type="button" onClick={() => navigate("/paper-trading")} style={{ fontSize: "0.8rem" }}>
               ← Sessions
             </button>
           )}
@@ -454,10 +477,10 @@ export default function LiveTradingView() {
                 <tbody>
                   {sessions.map((s) => (
                     <tr key={s.id} style={{ cursor: "pointer" }}>
-                      <td onClick={() => setActiveSessionId(s.id)} style={{ fontWeight: 600 }}>
+                      <td onClick={() => navigate(`/paper-trading/${s.id}`)} style={{ fontWeight: 600 }}>
                         {s.name}
                       </td>
-                      <td onClick={() => setActiveSessionId(s.id)}>
+                      <td onClick={() => navigate(`/paper-trading/${s.id}`)}>
                         <span
                           style={{
                             color:
@@ -472,8 +495,8 @@ export default function LiveTradingView() {
                           {s.is_running ? "● running" : s.status}
                         </span>
                       </td>
-                      <td onClick={() => setActiveSessionId(s.id)}>{s.order_type}</td>
-                      <td onClick={() => setActiveSessionId(s.id)}>
+                      <td onClick={() => navigate(`/paper-trading/${s.id}`)}>{s.order_type}</td>
+                      <td onClick={() => navigate(`/paper-trading/${s.id}`)}>
                         {s.created_at ? new Date(s.created_at).toLocaleString() : "—"}
                       </td>
                       <td>
@@ -497,6 +520,9 @@ export default function LiveTradingView() {
                             </button>
                           </>
                         )}
+                        <button type="button" onClick={() => cloneSession(s.id)} disabled={actionLoading} style={{ fontSize: "0.75rem", marginLeft: "0.3rem" }}>
+                          ⧉ Copy
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -566,6 +592,9 @@ export default function LiveTradingView() {
                   </button>
                 </>
               )}
+              <button type="button" onClick={() => cloneSession(activeSessionId)} disabled={actionLoading}>
+                ⧉ Copy
+              </button>
             </div>
           </div>
 

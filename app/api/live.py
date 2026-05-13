@@ -237,6 +237,57 @@ async def get_trades(session_id: str, symbol: str | None = None) -> dict:
     }
 
 
+@router.post("/sessions/{session_id}/clone")
+async def clone_session(session_id: str) -> dict:
+    """Clone a session's configuration into a new session (fresh state)."""
+    async with get_db_context() as db:
+        source = await repo.get_session(db, session_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        source_symbols = await repo.get_session_symbols(db, session_id)
+
+        new_session = await repo.create_session(
+            db,
+            name=f"{source.name} (copy)",
+            order_type=source.order_type,
+            position_size=source.position_size,
+            max_entries=source.max_entries,
+            max_daily_loss=source.max_daily_loss,
+        )
+
+        symbols_out = []
+        for ss in source_symbols:
+            new_sym = await repo.add_session_symbol(
+                db,
+                session_id=new_session.id,
+                symbol=ss.symbol,
+                algorithm_id=ss.algorithm_id,
+                allocated_capital=ss.allocated_capital,
+                position_size=ss.position_size,
+                max_entries=ss.max_entries,
+            )
+            symbols_out.append({
+                "id": new_sym.id,
+                "symbol": new_sym.symbol,
+                "algorithm_id": new_sym.algorithm_id,
+                "allocated_capital": new_sym.allocated_capital,
+            })
+
+    return {
+        "session": {
+            "id": new_session.id,
+            "name": new_session.name,
+            "status": new_session.status,
+            "order_type": new_session.order_type,
+            "position_size": new_session.position_size,
+            "max_entries": new_session.max_entries,
+            "max_daily_loss": new_session.max_daily_loss,
+            "created_at": new_session.created_at.isoformat() if new_session.created_at else None,
+        },
+        "symbols": symbols_out,
+    }
+
+
 # ── WebSocket — real-time session stream ─────────────────────────────
 
 @router.websocket("/ws/{session_id}")

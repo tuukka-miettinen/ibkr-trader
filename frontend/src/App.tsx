@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Link, Route, Switch, useLocation } from "wouter";
 
 import CandlestickChart from "./components/CandlestickChart";
 import LiveTradingView from "./components/LiveTradingView";
@@ -34,7 +35,7 @@ export default function App() {
   const [status, setStatus] = useState("Connecting");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<"live" | "tick-backtest" | "paper-trading">("live");
+  const [location] = useLocation();
   const socketRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -100,16 +101,31 @@ export default function App() {
     setSymbol(nextSymbol);
   }
 
+  const activeTab = location.startsWith("/paper-trading")
+    ? "paper-trading"
+    : location.startsWith("/tick-backtest")
+      ? "tick-backtest"
+      : "live";
+
   return (
     <main className="page-shell">
       <div className="tab-bar">
-        <button type="button" className={`tab${view === "live" ? " active" : ""}`} onClick={() => setView("live")}>Live chart</button>
-        <button type="button" className={`tab${view === "tick-backtest" ? " active" : ""}`} onClick={() => setView("tick-backtest")}>Tick Backtest</button>
-        <button type="button" className={`tab${view === "paper-trading" ? " active" : ""}`} onClick={() => setView("paper-trading")}>Paper Trading</button>
+        <Link href="/" className={`tab${activeTab === "live" ? " active" : ""}`}>Live chart</Link>
+        <Link href="/tick-backtest" className={`tab${activeTab === "tick-backtest" ? " active" : ""}`}>Tick Backtest</Link>
+        <Link href="/paper-trading" className={`tab${activeTab === "paper-trading" ? " active" : ""}`}>Paper Trading</Link>
       </div>
 
-      {view === "live" && (
-        <>
+      <Switch>
+        <Route path="/tick-backtest">
+          <TickBacktestView />
+        </Route>
+        <Route path="/paper-trading/:sessionId">
+          {(params) => <LiveTradingView initialSessionId={params.sessionId} />}
+        </Route>
+        <Route path="/paper-trading">
+          <LiveTradingView />
+        </Route>
+        <Route path="/">
           <section className="control-bar">
             <label>
               Symbol
@@ -138,12 +154,8 @@ export default function App() {
               <CandlestickChart candles={candles} events={[]} timeframe={timeframe} />
             </article>
           </section>
-        </>
-      )}
-
-      {view === "tick-backtest" && <TickBacktestView />}
-
-      {view === "paper-trading" && <LiveTradingView />}
+        </Route>
+      </Switch>
     </main>
   );
 }
