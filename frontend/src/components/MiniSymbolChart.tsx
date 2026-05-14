@@ -286,8 +286,6 @@ export default function MiniSymbolChart({ candles, trades, symbol, sessionStartT
 
     const candleTsSet = new Set(candles.map((c) => toTs(c.time) as number));
     const symbolTrades = trades.filter((t) => t.symbol === symbol);
-    const firstTs = candles.length > 0 ? toTs(candles[0].time) as number : 0;
-    const lastTs = candles.length > 0 ? toTs(candles[candles.length - 1].time) as number : 0;
     const markers: Array<{
       time: UTCTimestamp;
       position: "belowBar" | "aboveBar";
@@ -298,9 +296,6 @@ export default function MiniSymbolChart({ candles, trades, symbol, sessionStartT
 
     for (const t of symbolTrades) {
       if (!t.created_at) continue;
-      const tradeTs = Math.floor(new Date(t.created_at).getTime() / 1000);
-      // Skip trades outside the chart's time range
-      if (tradeTs < firstTs - 5 || tradeTs > lastTs + 5) continue;
       markers.push({
         time: snapToNearest(t.created_at, candleTsSet),
         position: t.side === "buy" ? "belowBar" : "aboveBar",
@@ -312,16 +307,13 @@ export default function MiniSymbolChart({ candles, trades, symbol, sessionStartT
 
     // Session start marker
     if (sessionStartTime) {
-      const startTs = Math.floor(new Date(sessionStartTime).getTime() / 1000);
-      if (startTs >= firstTs - 5 && startTs <= lastTs + 5) {
-        markers.push({
-          time: snapToNearest(sessionStartTime, candleTsSet),
-          position: "aboveBar",
-          color: "#3b82f6",
-          shape: "square",
-          text: "▶ Session",
-        });
-      }
+      markers.push({
+        time: snapToNearest(sessionStartTime, candleTsSet),
+        position: "aboveBar",
+        color: "#3b82f6",
+        shape: "square",
+        text: "▶ Session",
+      });
     }
 
     markers.sort((a, b) => (a.time as number) - (b.time as number));

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
@@ -13,6 +14,15 @@ from app.services.live_engine import live_engine
 
 router = APIRouter(prefix="/api/live", tags=["live"])
 repo = LiveRepository()
+
+
+def _iso_utc(dt: datetime | None) -> str | None:
+    """Serialize a datetime as ISO-8601 with explicit UTC offset."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.isoformat() + "Z"
+    return dt.isoformat()
 
 
 # ── Request / response models ────────────────────────────────────────
@@ -89,7 +99,7 @@ async def create_session(body: CreateSessionRequest) -> dict:
             "position_size": live_session.position_size,
             "max_entries": live_session.max_entries,
             "max_daily_loss": live_session.max_daily_loss,
-            "created_at": live_session.created_at.isoformat() if live_session.created_at else None,
+            "created_at": _iso_utc(live_session.created_at),
         },
         "symbols": symbols_out,
     }
@@ -144,9 +154,9 @@ async def list_sessions() -> dict:
                 "status": s.status,
                 "order_type": s.order_type,
                 "max_daily_loss": s.max_daily_loss,
-                "created_at": s.created_at.isoformat() if s.created_at else None,
-                "started_at": s.started_at.isoformat() if s.started_at else None,
-                "stopped_at": s.stopped_at.isoformat() if s.stopped_at else None,
+                "created_at": _iso_utc(s.created_at),
+                "started_at": _iso_utc(s.started_at),
+                "stopped_at": _iso_utc(s.stopped_at),
                 "error_message": s.error_message,
                 "is_running": live_engine.is_session_running(s.id),
             }
@@ -198,9 +208,9 @@ async def get_session(session_id: str) -> dict:
             "max_entries": s.max_entries,
             "max_daily_loss": s.max_daily_loss,
             "error_message": s.error_message,
-            "created_at": s.created_at.isoformat() if s.created_at else None,
-            "started_at": s.started_at.isoformat() if s.started_at else None,
-            "stopped_at": s.stopped_at.isoformat() if s.stopped_at else None,
+            "created_at": _iso_utc(s.created_at),
+            "started_at": _iso_utc(s.started_at),
+            "stopped_at": _iso_utc(s.stopped_at),
         },
         "symbols": symbols_data,
         "is_running": live_engine.is_session_running(s.id),
@@ -265,7 +275,7 @@ async def get_trades(session_id: str, symbol: str | None = None) -> dict:
                 "pnl_pct": t.pnl_pct,
                 "ibkr_order_id": t.ibkr_order_id,
                 "status": t.status,
-                "created_at": t.created_at.isoformat() if t.created_at else None,
+                "created_at": _iso_utc(t.created_at),
             }
             for t in trades
         ]
@@ -317,7 +327,7 @@ async def clone_session(session_id: str) -> dict:
             "position_size": new_session.position_size,
             "max_entries": new_session.max_entries,
             "max_daily_loss": new_session.max_daily_loss,
-            "created_at": new_session.created_at.isoformat() if new_session.created_at else None,
+            "created_at": _iso_utc(new_session.created_at),
         },
         "symbols": symbols_out,
     }

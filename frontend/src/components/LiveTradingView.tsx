@@ -62,11 +62,14 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
   } | null>(null);
   const [trades, setTrades] = useState<LiveTrade[]>([]);
   const [symbolCandles, setSymbolCandles] = useState<Record<string, MiniCandle[]>>({});
+  const symbolCandlesRef = useRef<Record<string, MiniCandle[]>>({});
+  const candleSyncTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [symbolTestResults, setSymbolTestResults] = useState<Record<string, { ok: boolean; exchange?: string; last_price?: number; error?: string; note?: string } | "loading">>({});
+  const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
 
   // ── Load sessions + algorithms on mount ──
   useEffect(() => {
@@ -252,11 +255,17 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                 merged.push(lc);
               }
             }
-            candleMap[s.symbol] = merged;
+            if (merged.length > 0) {
+              candleMap[s.symbol] = merged;
+            }
           } catch { /* ignore */ }
         }),
       );
-      setSymbolCandles(candleMap);
+      // Only set candles for symbols that returned data; preserve existing tick data for others
+      if (Object.keys(candleMap).length > 0) {
+        symbolCandlesRef.current = { ...symbolCandlesRef.current, ...candleMap };
+        setSymbolCandles({ ...symbolCandlesRef.current });
+      }
     } catch { /* ignore */ }
   }
 
@@ -268,8 +277,32 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
       setSessionDetail(null);
       setTrades([]);
       setSymbolCandles({});
+      symbolCandlesRef.current = {};
     }
   }, [activeSessionId]);
+
+  // ── Sync candle ref → state when chart is expanded ──
+  useEffect(() => {
+    if (!expandedSymbol) {
+      if (candleSyncTimerRef.current) {
+        clearInterval(candleSyncTimerRef.current);
+        candleSyncTimerRef.current = null;
+      }
+      return;
+    }
+    // Immediate sync
+    setSymbolCandles({ ...symbolCandlesRef.current });
+    // Periodic sync every 2s while chart is open
+    candleSyncTimerRef.current = setInterval(() => {
+      setSymbolCandles({ ...symbolCandlesRef.current });
+    }, 2000);
+    return () => {
+      if (candleSyncTimerRef.current) {
+        clearInterval(candleSyncTimerRef.current);
+        candleSyncTimerRef.current = null;
+      }
+    };
+  }, [expandedSymbol]);
 
   // ── WebSocket for live updates ──
   useEffect(() => {
@@ -332,22 +365,20 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
               ),
             };
           });
-          // Append 5s candle to chart data for real-time updates
+          // Append 5s candle to ref (avoid expensive state spread on every tick)
           if (evt.open != null && evt.high != null && evt.low != null && evt.close != null) {
-            setSymbolCandles((prev) => ({
+            const prev = symbolCandlesRef.current[evt.symbol] ?? [];
+            symbolCandlesRef.current[evt.symbol] = [
               ...prev,
-              [evt.symbol]: [
-                ...(prev[evt.symbol] ?? []),
-                {
-                  time: evt.time,
-                  open: evt.open,
-                  high: evt.high,
-                  low: evt.low,
-                  close: evt.close,
-                  volume: evt.volume ?? 0,
-                },
-              ],
-            }));
+              {
+                time: evt.time,
+                open: evt.open,
+                high: evt.high,
+                low: evt.low,
+                close: evt.close,
+                volume: evt.volume ?? 0,
+              },
+            ];
           }
           return;
         }
@@ -745,99 +776,129 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
             </div>
           )}
 
-          {/* Symbol cards with charts */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "0.75rem", marginBottom: "0.75rem" }}>
-            {sessionDetail.symbols.map((s) => {
-              const unrealized = s.unrealized_pnl ?? 0;
-              const realized = s.realized_pnl ?? 0;
-              const hasPosition = (s.current_shares ?? 0) > 0;
-              const portfolioVal = s.portfolio_value ?? s.cash_remaining + (s.current_shares * (s.last_price ?? 0));
-              return (
-                <div
-                  key={s.id}
-                  style={{
-                    background: "rgba(15, 23, 42, 0.9)",
-                    border: "1px solid rgba(148, 163, 184, 0.15)",
-                    borderRadius: "8px",
-                    padding: "0.75rem",
-                  }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
-                    <span style={{ fontWeight: 700, fontSize: "1rem" }}>
-                      {s.symbol}
-                      {s.last_price != null && (
-                        <span style={{ fontWeight: 600, marginLeft: "0.5rem", color: "#e2e8f0" }}>
-                          {fmt$(s.last_price)}
-                        </span>
-                      )}
-                      {s.delayed && (
-                        <span
-                          style={{
-                            marginLeft: "0.5rem",
-                            fontSize: "0.65rem",
-                            fontWeight: 600,
-                            background: "#92400e",
-                            color: "#fbbf24",
-                            padding: "0.1rem 0.35rem",
-                            borderRadius: "4px",
-                            verticalAlign: "middle",
-                          }}
-                        >
-                          DELAYED ~15min · paper only
-                        </span>
-                      )}
-                    </span>
-                  </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.25rem 1rem", fontSize: "0.8rem", marginBottom: "0.5rem" }}>
-                    <div>
-                      <span style={{ color: "#64748b" }}>Position</span>
-                      <div style={{ fontWeight: 600 }}>
-                        {hasPosition ? `${(s.current_shares).toFixed(2)} sh @ ${fmt$(s.avg_price ?? (s.current_cost / s.current_shares))}` : "None"}
-                      </div>
-                    </div>
-                    <div>
-                      <span style={{ color: "#64748b" }}>Cash</span>
-                      <div style={{ fontWeight: 600 }}>{fmt$(s.cash_remaining)}</div>
-                    </div>
-                    <div>
-                      <span style={{ color: "#64748b" }}>Unrealized P&L</span>
-                      <div style={{ fontWeight: 600, color: pnlColor(unrealized) }}>
+          {/* Symbol grid */}
+          <div className="backtest-trades backtest-batch-results" style={{ marginBottom: "0.75rem" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: "left" }}>Ticker</th>
+                  <th style={{ textAlign: "right" }}>Price</th>
+                  <th style={{ textAlign: "right" }}>Position</th>
+                  <th style={{ textAlign: "right" }}>Cash</th>
+                  <th style={{ textAlign: "right" }}>Unreal. P&L</th>
+                  <th style={{ textAlign: "right" }}>Real. P&L</th>
+                  <th style={{ textAlign: "right" }}>Daily P&L</th>
+                  <th style={{ textAlign: "right" }}>Portfolio</th>
+                  <th style={{ textAlign: "center" }}>B/S/T</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...sessionDetail.symbols].sort((a, b) => a.symbol.localeCompare(b.symbol)).map((s) => {
+                  const unrealized = s.unrealized_pnl ?? 0;
+                  const realized = s.realized_pnl ?? 0;
+                  const hasPosition = (s.current_shares ?? 0) > 0;
+                  const portfolioVal = s.portfolio_value ?? s.cash_remaining + (s.current_shares * (s.last_price ?? 0));
+                  const isExpanded = expandedSymbol === s.symbol;
+                  const symTrades = trades.filter((t) => t.symbol === s.symbol);
+                  const buys = symTrades.filter((t) => t.side === "buy").length;
+                  const sells = symTrades.filter((t) => t.side === "sell").length;
+                  return (
+                    <tr key={s.id} style={{ cursor: "pointer" }} onClick={() => setExpandedSymbol(isExpanded ? null : s.symbol)}>
+                      <td style={{ fontWeight: 700 }}>
+                        <span style={{ marginRight: "0.35rem", fontSize: "0.7rem", color: "#64748b" }}>{isExpanded ? "▼" : "▶"}</span>
+                        {s.symbol}
+                        {s.delayed && (
+                          <span
+                            style={{
+                              marginLeft: "0.4rem",
+                              fontSize: "0.6rem",
+                              fontWeight: 600,
+                              background: "#92400e",
+                              color: "#fbbf24",
+                              padding: "0.05rem 0.25rem",
+                              borderRadius: "3px",
+                              verticalAlign: "middle",
+                            }}
+                          >
+                            DELAYED
+                          </span>
+                        )}
+                      </td>
+                      <td style={{ textAlign: "right", fontWeight: 600 }}>
+                        {s.last_price != null ? fmt$(s.last_price) : "—"}
+                      </td>
+                      <td style={{ textAlign: "right" }}>
+                        {hasPosition
+                          ? `${s.current_shares.toFixed(0)} @ ${fmt$(s.avg_price ?? (s.current_cost / s.current_shares))}`
+                          : "—"}
+                      </td>
+                      <td style={{ textAlign: "right" }}>{fmt$(s.cash_remaining)}</td>
+                      <td style={{ textAlign: "right", color: pnlColor(unrealized), fontWeight: 600 }}>
                         {hasPosition ? fmtSigned$(unrealized) : "—"}
-                      </div>
-                    </div>
-                    <div>
-                      <span style={{ color: "#64748b" }}>Realized P&L</span>
-                      <div style={{ fontWeight: 600, color: pnlColor(realized) }}>
+                      </td>
+                      <td style={{ textAlign: "right", color: pnlColor(realized), fontWeight: 600 }}>
                         {fmtSigned$(realized)}
-                      </div>
-                    </div>
-                    <div>
-                      <span style={{ color: "#64748b" }}>Daily P&L</span>
-                      <div style={{ fontWeight: 600, color: pnlColor(s.daily_realized_pnl ?? 0) }}>
+                      </td>
+                      <td style={{ textAlign: "right", color: pnlColor(s.daily_realized_pnl ?? 0), fontWeight: 600 }}>
                         {fmtSigned$(s.daily_realized_pnl ?? 0)}
-                      </div>
-                    </div>
-                    <div>
-                      <span style={{ color: "#64748b" }}>Portfolio</span>
-                      <div style={{ fontWeight: 600 }}>{fmt$(portfolioVal)}</div>
-                    </div>
-                    {s.tick_count != null && (
-                      <div style={{ gridColumn: "1 / -1", color: "#475569", fontSize: "0.7rem", marginTop: "0.25rem" }}>
-                        {s.tick_count.toLocaleString()} ticks
-                        {s.last_tick_time && ` · last: ${new Date(s.last_tick_time).toLocaleTimeString()}`}
-                      </div>
-                    )}
-                  </div>
-                  <MiniSymbolChart
-                    candles={symbolCandles[s.symbol] ?? []}
-                    trades={trades}
-                    symbol={s.symbol}
-                    sessionStartTime={sessionDetail.session.started_at}
-                  />
-                </div>
-              );
-            })}
+                      </td>
+                      <td style={{ textAlign: "right", fontWeight: 600 }}>
+                        {fmt$(portfolioVal)}
+                      </td>
+                      <td style={{ textAlign: "center", fontWeight: 600, fontSize: "0.85rem" }}>
+                        <span style={{ color: "#10b981" }}>{buys}</span>
+                        <span style={{ color: "#64748b" }}>/</span>
+                        <span style={{ color: "#ef4444" }}>{sells}</span>
+                        <span style={{ color: "#64748b" }}>/</span>
+                        <span style={{ color: "#e2e8f0" }}>{symTrades.length}</span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
+
+          {/* Expanded chart accordion */}
+          {expandedSymbol && sessionDetail.symbols.some((s) => s.symbol === expandedSymbol) && (
+            <div
+              style={{
+                background: "rgba(15, 23, 42, 0.9)",
+                border: "1px solid rgba(148, 163, 184, 0.15)",
+                borderRadius: "8px",
+                padding: "0.75rem",
+                marginBottom: "0.75rem",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+                <span style={{ fontWeight: 700, fontSize: "1rem" }}>
+                  {expandedSymbol}
+                  {(() => {
+                    const s = sessionDetail.symbols.find((sym) => sym.symbol === expandedSymbol);
+                    return s?.last_price != null ? (
+                      <span style={{ fontWeight: 600, marginLeft: "0.5rem", color: "#e2e8f0" }}>
+                        {fmt$(s.last_price)}
+                      </span>
+                    ) : null;
+                  })()}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setExpandedSymbol(null)}
+                  style={{ fontSize: "0.75rem", padding: "0.15rem 0.4rem" }}
+                >
+                  ✕ Close
+                </button>
+              </div>
+              <MiniSymbolChart
+                key={expandedSymbol}
+                candles={symbolCandles[expandedSymbol] ?? []}
+                trades={trades}
+                symbol={expandedSymbol}
+                sessionStartTime={sessionDetail.session.started_at}
+              />
+            </div>
+          )}
 
           {/* Trade log */}
           <div className="backtest-trades backtest-batch-results">
