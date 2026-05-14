@@ -39,14 +39,14 @@ def test_run_accumulates_buys_and_exits_full_position() -> None:
 
     assert result.num_trades == 1
     assert result.total_dollar_pnl == result.trades[0].dollar_pnl
-    assert result.final_balance == 10193.0556
+    assert result.final_balance == 10185.0
 
     trade = result.trades[0]
     assert len(trade.entries) == 3
-    assert trade.entry_price == 89.2562
+    assert trade.entry_price == 89.3939
     assert trade.exit_price == 95.0
-    assert trade.dollar_pnl == 193.0556
-    assert trade.shares == 33.61111111
+    assert trade.dollar_pnl == 185.0
+    assert trade.shares == 33
 
 
 def test_run_respects_max_entries_limit() -> None:
@@ -71,5 +71,5 @@ def test_run_respects_max_entries_limit() -> None:
 
     trade = result.trades[0]
     assert len(trade.entries) == 2
-    assert trade.total_cost == 2000.0
-    assert trade.dollar_pnl == 5.5556
+    assert trade.total_cost == 1990.0
+    assert trade.dollar_pnl == 5.0

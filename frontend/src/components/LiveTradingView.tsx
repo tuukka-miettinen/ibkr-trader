@@ -66,6 +66,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
   const wsRef = useRef<WebSocket | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [symbolTestResults, setSymbolTestResults] = useState<Record<string, { ok: boolean; exchange?: string; last_price?: number; error?: string; note?: string } | "loading">>({});
 
   // ── Load sessions + algorithms on mount ──
   useEffect(() => {
@@ -194,7 +195,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
   }
 
   // ── Load session detail ──
-  async function loadSessionDetail(sessionId: string) {
+  async function loadSessionDetail(sessionId: string, { skipCandles = false } = {}) {
     try {
       const [detailRes, tradesRes] = await Promise.all([
         fetch(`${API_BASE}/api/live/sessions/${sessionId}`),
@@ -210,6 +211,9 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
         const data = await tradesRes.json();
         setTrades(data.trades ?? []);
       }
+
+      if (skipCandles) return;
+
       // Fetch candles for each symbol: historical 1m candles + any live aggregator candles
       const candleMap: Record<string, MiniCandle[]> = {};
       await Promise.all(
@@ -307,6 +311,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
         }
 
         if (evt.type === "tick") {
+          // Update stats
           setSessionDetail((prev) => {
             if (!prev) return prev;
             return {
@@ -327,14 +332,29 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
               ),
             };
           });
+          // Append 5s candle to chart data for real-time updates
+          if (evt.open != null && evt.high != null && evt.low != null && evt.close != null) {
+            setSymbolCandles((prev) => ({
+              ...prev,
+              [evt.symbol]: [
+                ...(prev[evt.symbol] ?? []),
+                {
+                  time: evt.time,
+                  open: evt.open,
+                  high: evt.high,
+                  low: evt.low,
+                  close: evt.close,
+                  volume: evt.volume ?? 0,
+                },
+              ],
+            }));
+          }
           return;
         }
 
         if (evt.type === "candle") {
-          setSymbolCandles((prev) => ({
-            ...prev,
-            [evt.symbol]: [...(prev[evt.symbol] ?? []), evt.candle],
-          }));
+          // Candle events are now redundant — tick events provide 5s chart data.
+          // Appending both would create out-of-order timestamps.
           return;
         }
 
@@ -357,15 +377,20 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
             } satisfies LiveTrade,
             ...prev,
           ]);
-          // Also refresh detail for position updates
-          if (activeSessionId) loadSessionDetail(activeSessionId);
+          // Also refresh detail for position updates (skip candles to preserve tick data)
+          if (activeSessionId) loadSessionDetail(activeSessionId, { skipCandles: true });
+          return;
+        }
+
+        if (evt.type === "error") {
+          setActionError(`IBKR: ${evt.message}`);
           return;
         }
 
         if (evt.type === "status") {
           if (evt.status === "stopped" || evt.status === "error") {
             refreshSessions();
-            if (activeSessionId) loadSessionDetail(activeSessionId);
+            if (activeSessionId) loadSessionDetail(activeSessionId, { skipCandles: true });
           }
         }
       } catch { /* ignore */ }
@@ -387,6 +412,23 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
   }
   function updateSymbolRow(idx: number, field: "symbol" | "algorithm_id", value: string) {
     setFormSymbols((prev) => prev.map((r, i) => (i === idx ? { ...r, [field]: value } : r)));
+  }
+
+  async function testSymbolConnection(symbol: string) {
+    if (!symbol.trim()) return;
+    const sym = symbol.trim().toUpperCase();
+    setSymbolTestResults((prev) => ({ ...prev, [sym]: "loading" }));
+    try {
+      const res = await fetch(`${API_BASE}/api/live/test-symbol/${encodeURIComponent(sym)}`);
+      if (res.ok) {
+        const data = await res.json();
+        setSymbolTestResults((prev) => ({ ...prev, [sym]: data }));
+      } else {
+        setSymbolTestResults((prev) => ({ ...prev, [sym]: { ok: false, error: "API error" } }));
+      }
+    } catch {
+      setSymbolTestResults((prev) => ({ ...prev, [sym]: { ok: false, error: "Network error" } }));
+    }
   }
 
   // ── Render ──
@@ -475,7 +517,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
           <div style={{ marginBottom: "0.75rem" }}>
             <div style={{ fontSize: "0.8rem", color: "#94a3b8", marginBottom: "0.35rem" }}>Symbols</div>
             {formSymbols.map((row, idx) => (
-              <div key={idx} style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginBottom: "0.3rem" }}>
+              <div key={idx} style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginBottom: "0.3rem", flexWrap: "wrap" }}>
                 <input
                   type="text"
                   placeholder="AAPL"
@@ -495,6 +537,27 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                     </option>
                   ))}
                 </select>
+                <button
+                  type="button"
+                  onClick={() => testSymbolConnection(row.symbol)}
+                  disabled={!row.symbol.trim() || symbolTestResults[row.symbol.toUpperCase()] === "loading"}
+                  style={{ fontSize: "0.7rem", padding: "0.15rem 0.4rem" }}
+                >
+                  {symbolTestResults[row.symbol.toUpperCase()] === "loading" ? "Testing…" : "Test"}
+                </button>
+                {(() => {
+                  const r = symbolTestResults[row.symbol.toUpperCase()];
+                  if (!r || r === "loading") return null;
+                  if (r.ok) {
+                    return (
+                      <span style={{ fontSize: "0.7rem", color: r.note ? "#f59e0b" : "#10b981" }}>
+                        {r.note ? "⚠" : "✓"} {r.exchange}{r.last_price != null ? ` · $${r.last_price}` : ""}
+                        {r.note ? ` — ${r.note}` : ""}
+                      </span>
+                    );
+                  }
+                  return <span style={{ fontSize: "0.7rem", color: "#ef4444" }}>✗ {r.error}</span>;
+                })()}
                 {formSymbols.length > 1 && (
                   <button type="button" onClick={() => removeSymbolRow(idx)} style={{ fontSize: "0.7rem", padding: "0.1rem 0.3rem" }}>
                     ✕
@@ -699,10 +762,30 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                     padding: "0.75rem",
                   }}
                 >
-                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.5rem" }}>
-                    <span style={{ fontWeight: 700, fontSize: "1rem" }}>{s.symbol}</span>
-                    <span style={{ fontSize: "1rem", fontWeight: 600 }}>
-                      {s.last_price != null ? fmt$(s.last_price) : "—"}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+                    <span style={{ fontWeight: 700, fontSize: "1rem" }}>
+                      {s.symbol}
+                      {s.last_price != null && (
+                        <span style={{ fontWeight: 600, marginLeft: "0.5rem", color: "#e2e8f0" }}>
+                          {fmt$(s.last_price)}
+                        </span>
+                      )}
+                      {s.delayed && (
+                        <span
+                          style={{
+                            marginLeft: "0.5rem",
+                            fontSize: "0.65rem",
+                            fontWeight: 600,
+                            background: "#92400e",
+                            color: "#fbbf24",
+                            padding: "0.1rem 0.35rem",
+                            borderRadius: "4px",
+                            verticalAlign: "middle",
+                          }}
+                        >
+                          DELAYED ~15min · paper only
+                        </span>
+                      )}
                     </span>
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.25rem 1rem", fontSize: "0.8rem", marginBottom: "0.5rem" }}>
@@ -749,6 +832,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                     candles={symbolCandles[s.symbol] ?? []}
                     trades={trades}
                     symbol={s.symbol}
+                    sessionStartTime={sessionDetail.session.started_at}
                   />
                 </div>
               );

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -45,6 +46,7 @@ class SymbolRuntime:
     last_price: float = 0.0
     tick_count: int = 0
     last_tick_time: datetime | None = None
+    delayed: bool = False
 
 
 class LiveTradingEngine:
@@ -71,7 +73,7 @@ class LiveTradingEngine:
             live_session = await self._repo.get_session(db, session_id)
             if live_session is None:
                 raise ValueError(f"Session {session_id} not found")
-            if live_session.status not in ("created", "stopped"):
+            if live_session.status not in ("created", "stopped", "running"):
                 raise RuntimeError(f"Session is in '{live_session.status}' state, cannot start")
 
             session_symbols = await self._repo.get_session_symbols(db, session_id)
@@ -143,6 +145,30 @@ class LiveTradingEngine:
                     )
                 raise
 
+        # Forward IBKR errors to the WebSocket so the UI can display them
+        def _ibkr_error_handler(req_id: int, error_code: int, error_string: str) -> None:
+            # Ignore non-critical / informational messages
+            if 2100 <= error_code <= 2200:  # connection status
+                return
+            if error_code == 162:  # "no data" — market closed or no recent trades
+                logger.debug("IBKR no data (reqId=%d): %s", req_id, error_string)
+                return
+            if error_code == 300:  # "can't find EId" — follows after 420
+                return
+            if error_code == 420:  # "no real-time permissions" — handled by polling fallback
+                return
+            logger.warning("IBKR error %d (reqId=%d): %s", error_code, req_id, error_string)
+            if self._loop:
+                asyncio.run_coroutine_threadsafe(
+                    self._broadcast(session_id, {
+                        "type": "error",
+                        "message": f"IBKR error {error_code}: {error_string}",
+                    }),
+                    self._loop,
+                )
+
+        self._client.on_error = _ibkr_error_handler
+
         # Store session state
         self._sessions[session_id] = {
             "session": live_session,
@@ -153,19 +179,39 @@ class LiveTradingEngine:
 
         # Subscribe to real-time bars for each symbol
         for sym, runtime in symbol_runtimes.items():
+            # Pre-load historical candles so indicators (RSI, VWAP) have
+            # warm-up data from the start instead of waiting 30+ minutes.
+            for tf in CANDLE_TIMEFRAMES:
+                try:
+                    historical = self._client.get_historical_candles(sym, tf, "1 D")
+                    if historical:
+                        runtime.aggregator.seed_candles(tf, historical)
+                        logger.info(
+                            "Seeded %d %s candles for %s", len(historical), tf, sym,
+                        )
+                except Exception:
+                    logger.warning("Could not pre-load %s candles for %s", tf, sym, exc_info=True)
+
             self._client.subscribe_realtime_bars(
                 sym, lambda candle, _sid=session_id, _sym=sym: self._on_tick(_sid, _sym, candle)
             )
+            # Check if the symbol fell back to polling (delayed data)
+            if self._client.is_polling_symbol(sym):
+                runtime.delayed = True
+                logger.info("Symbol %s is using delayed data (polling)", sym)
 
         # Mark session as running
         async with get_db_context() as db:
             await self._repo.update_session_status(db, session_id, "running")
 
+        delayed_syms = [s for s, rt in symbol_runtimes.items() if rt.delayed]
         await self._broadcast(session_id, {
             "type": "status",
             "status": "running",
-            "message": f"Session started with {len(symbol_runtimes)} symbol(s)",
+            "message": f"Session started with {len(symbol_runtimes)} symbol(s)"
+                       + (f" ({len(delayed_syms)} using delayed data)" if delayed_syms else ""),
             "symbols": list(symbol_runtimes.keys()),
+            "delayed_symbols": delayed_syms,
         })
 
         logger.info("Live session %s started with symbols: %s", session_id, list(symbol_runtimes.keys()))
@@ -242,6 +288,7 @@ class LiveTradingEngine:
                 "tick_count": rt.tick_count,
                 "last_tick_time": rt.last_tick_time.isoformat() if rt.last_tick_time else None,
                 "position_entries": rt.position_entries,
+                "delayed": rt.delayed,
             }
         return {
             "session_id": session_id,
@@ -296,8 +343,24 @@ class LiveTradingEngine:
         rt.tick_count += 1
         rt.last_tick_time = candle.time
 
+        if rt.tick_count == 1:
+            logger.info(
+                "[%s] First tick received for %s: price=%.4f time=%s",
+                session_id[:8], symbol, candle.close, candle.time,
+            )
+
         # Push through aggregator
         closed = rt.aggregator.push(candle)
+
+        # Log closed candles
+        for tf, closed_candle in closed.items():
+            if closed_candle is not None:
+                logger.info(
+                    "[%s] %s candle closed for %s: O=%.2f H=%.2f L=%.2f C=%.2f V=%d",
+                    session_id[:8], tf, symbol,
+                    closed_candle.open, closed_candle.high, closed_candle.low,
+                    closed_candle.close, closed_candle.volume,
+                )
 
         # Broadcast closed 1m candle for charts
         closed_1m = closed.get(Timeframe.ONE_MINUTE)
@@ -348,22 +411,30 @@ class LiveTradingEngine:
         if isinstance(result, dict):
             signal = result.get("signal")
             if signal in ("buy", "sell"):
+                logger.info(
+                    "[%s] Strategy signal: %s for %s (tick #%d, price=%.4f, position=%s)",
+                    session_id[:8], signal, symbol, rt.tick_count, candle.close,
+                    f"{rt.position_shares:.4f} shares" if rt.position_shares > 0 else "flat",
+                )
                 await self._execute_signal(session_id, symbol, signal, candle, result, state)
 
-        # Broadcast tick event (throttled: every 12th tick ≈ 1 minute)
-        if rt.tick_count % 12 == 0 or (isinstance(result, dict) and result.get("signal") in ("buy", "sell")):
-            unrealized = (rt.position_shares * candle.close - rt.position_cost) if rt.position_shares > 0 else 0.0
-            await self._broadcast(session_id, {
-                "type": "tick",
-                "symbol": symbol,
-                "time": candle.time.isoformat(),
-                "price": round(candle.close, 4),
-                "volume": candle.volume,
-                "position_shares": round(rt.position_shares, 8),
-                "unrealized_pnl": round(unrealized, 4),
-                "realized_pnl": round(rt.realized_pnl, 4),
-                "cash": round(rt.cash, 4),
-                "portfolio_value": round(rt.cash + market_value, 4),
+        # Broadcast every tick so the chart can show 5-second granularity
+        unrealized = (rt.position_shares * candle.close - rt.position_cost) if rt.position_shares > 0 else 0.0
+        await self._broadcast(session_id, {
+            "type": "tick",
+            "symbol": symbol,
+            "time": candle.time.isoformat(),
+            "open": round(candle.open, 4),
+            "high": round(candle.high, 4),
+            "low": round(candle.low, 4),
+            "close": round(candle.close, 4),
+            "price": round(candle.close, 4),
+            "volume": candle.volume,
+            "position_shares": round(rt.position_shares, 8),
+            "unrealized_pnl": round(unrealized, 4),
+            "realized_pnl": round(rt.realized_pnl, 4),
+            "cash": round(rt.cash, 4),
+            "portfolio_value": round(rt.cash + market_value, 4),
                 "tick_count": rt.tick_count,
             })
 
@@ -394,27 +465,35 @@ class LiveTradingEngine:
             ):
                 return
 
-            shares = buy_amount / candle.close
-
-            # Place order via IBKR
-            ibkr_order_id = None
-            try:
-                if order_type == "limit":
-                    trade = self._client.place_limit_order(symbol, "BUY", shares, candle.close)
-                else:
-                    trade = self._client.place_market_order(symbol, "BUY", shares)
-                ibkr_order_id = trade.order.orderId if trade.order else None
-            except Exception:
-                logger.exception("Failed to place BUY order for %s", symbol)
-                await self._broadcast(session_id, {
-                    "type": "error",
-                    "symbol": symbol,
-                    "message": f"Failed to place BUY order for {symbol}",
-                })
+            shares = math.floor(buy_amount / candle.close)
+            if shares < 1:
                 return
+            cost = shares * candle.close
+
+            # Place order via IBKR (skip for delayed data — paper fills only)
+            ibkr_order_id = None
+            if rt.delayed:
+                logger.info(
+                    "[%s] Paper-only BUY for %s (delayed data): %d shares @ %.4f",
+                    session_id[:8], symbol, shares, candle.close,
+                )
+            else:
+                try:
+                    if order_type == "limit":
+                        trade = self._client.place_limit_order(symbol, "BUY", shares, candle.close)
+                    else:
+                        trade = self._client.place_market_order(symbol, "BUY", shares)
+                    ibkr_order_id = trade.order.orderId if trade.order else None
+                except Exception:
+                    logger.exception("Failed to place BUY order for %s", symbol)
+                    await self._broadcast(session_id, {
+                        "type": "error",
+                        "symbol": symbol,
+                        "message": f"Failed to place BUY order for {symbol}",
+                    })
+                    return
 
             # Update in-memory state
-            cost = shares * candle.close
             rt.cash -= cost
             rt.position_cost += cost
             rt.position_shares += shares
@@ -481,22 +560,28 @@ class LiveTradingEngine:
                 await self.stop_session(session_id, reason="daily loss limit reached")
                 return
 
-            # Place order via IBKR
+            # Place order via IBKR (skip for delayed data — paper fills only)
             ibkr_order_id = None
-            try:
-                if order_type == "limit":
-                    trade = self._client.place_limit_order(symbol, "SELL", rt.position_shares, candle.close)
-                else:
-                    trade = self._client.place_market_order(symbol, "SELL", rt.position_shares)
-                ibkr_order_id = trade.order.orderId if trade.order else None
-            except Exception:
-                logger.exception("Failed to place SELL order for %s", symbol)
-                await self._broadcast(session_id, {
-                    "type": "error",
-                    "symbol": symbol,
-                    "message": f"Failed to place SELL order for {symbol}",
-                })
-                return
+            if rt.delayed:
+                logger.info(
+                    "[%s] Paper-only SELL for %s (delayed data): %.4f shares @ %.4f",
+                    session_id[:8], symbol, rt.position_shares, candle.close,
+                )
+            else:
+                try:
+                    if order_type == "limit":
+                        trade = self._client.place_limit_order(symbol, "SELL", rt.position_shares, candle.close)
+                    else:
+                        trade = self._client.place_market_order(symbol, "SELL", rt.position_shares)
+                    ibkr_order_id = trade.order.orderId if trade.order else None
+                except Exception:
+                    logger.exception("Failed to place SELL order for %s", symbol)
+                    await self._broadcast(session_id, {
+                        "type": "error",
+                        "symbol": symbol,
+                        "message": f"Failed to place SELL order for {symbol}",
+                    })
+                    return
 
             # Persist trade
             async with get_db_context() as db:

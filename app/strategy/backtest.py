@@ -113,7 +113,9 @@ def run(candles: list[Candle], sigs: list[dict], config: BacktestConfig | None =
                 and cash_balance >= resolved_config.position_size
                 and len(position_entries) < resolved_config.max_entries
             ):
-                shares = resolved_config.position_size / bar.close
+                shares = int(resolved_config.position_size // bar.close)
+                if shares < 1:
+                    continue
                 cost = shares * bar.close
                 cash_balance -= cost
                 position_cost += cost

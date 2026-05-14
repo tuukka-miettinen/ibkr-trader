@@ -5,6 +5,7 @@ import {
   LineStyle,
   createChart,
   type IChartApi,
+  type ISeriesApi,
   type UTCTimestamp,
 } from "lightweight-charts";
 
@@ -23,16 +24,23 @@ type Props = {
   candles: MiniCandle[];
   trades: LiveTrade[];
   symbol: string;
+  sessionStartTime?: string | null;
 };
 
 function toTs(iso: string): UTCTimestamp {
   return Math.floor(new Date(iso).getTime() / 1000) as UTCTimestamp;
 }
 
-function snapToMinute(iso: string): UTCTimestamp {
-  const d = new Date(iso);
-  d.setUTCSeconds(0, 0);
-  return Math.floor(d.getTime() / 1000) as UTCTimestamp;
+function snapToNearest(iso: string, candleTsSet: Set<number>): UTCTimestamp {
+  const snapped = Math.floor(new Date(iso).getTime() / 1000);
+  if (candleTsSet.has(snapped)) return snapped as UTCTimestamp;
+  let best = snapped;
+  let bestDist = Infinity;
+  for (const ts of candleTsSet) {
+    const d = Math.abs(ts - snapped);
+    if (d < bestDist) { bestDist = d; best = ts; }
+  }
+  return best as UTCTimestamp;
 }
 
 function buildIntradayVwap(candles: MiniCandle[]): { time: UTCTimestamp; value: number }[] {
@@ -78,44 +86,49 @@ function buildRsi(closes: number[], period = 14): (number | null)[] {
   return result;
 }
 
-export default function MiniSymbolChart({ candles, trades, symbol }: Props) {
+const CHART_OPTS = {
+  layout: {
+    background: { type: ColorType.Solid as const, color: "transparent" },
+    textColor: "#94a3b8",
+    fontSize: 10,
+  },
+  grid: {
+    vertLines: { color: "rgba(148,163,184,0.06)" },
+    horzLines: { color: "rgba(148,163,184,0.06)" },
+  },
+  crosshair: { mode: CrosshairMode.Normal },
+  rightPriceScale: { borderColor: "rgba(148,163,184,0.15)" },
+};
+
+export default function MiniSymbolChart({ candles, trades, symbol, sessionStartTime }: Props) {
   const priceRef = useRef<HTMLDivElement>(null);
   const rsiRef = useRef<HTMLDivElement>(null);
   const priceChartRef = useRef<IChartApi | null>(null);
   const rsiChartRef = useRef<IChartApi | null>(null);
+  const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const vwapSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const rsiSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const renderedCountRef = useRef(0);
+  const observerRef = useRef<ResizeObserver | null>(null);
 
+  // ── Create chart once per symbol ──
   useEffect(() => {
-    if (!priceRef.current || !rsiRef.current || candles.length === 0) return;
-
-    if (priceChartRef.current) { priceChartRef.current.remove(); priceChartRef.current = null; }
-    if (rsiChartRef.current) { rsiChartRef.current.remove(); rsiChartRef.current = null; }
+    if (!priceRef.current || !rsiRef.current) return;
 
     const width = priceRef.current.clientWidth;
-    const chartOpts = {
-      width,
-      layout: {
-        background: { type: ColorType.Solid as const, color: "transparent" },
-        textColor: "#94a3b8",
-        fontSize: 10,
-      },
-      grid: {
-        vertLines: { color: "rgba(148,163,184,0.06)" },
-        horzLines: { color: "rgba(148,163,184,0.06)" },
-      },
-      crosshair: { mode: CrosshairMode.Normal },
-      timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: "rgba(148,163,184,0.15)",
-      },
-      rightPriceScale: { borderColor: "rgba(148,163,184,0.15)" },
-    };
 
     // ── Price chart ──
-    const priceChart = createChart(priceRef.current, { ...chartOpts, height: 180 });
+    const priceChart = createChart(priceRef.current, {
+      ...CHART_OPTS,
+      width,
+      height: 180,
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: true,
+        borderColor: "rgba(148,163,184,0.15)",
+      },
+    });
     priceChartRef.current = priceChart;
-
-    const candleTsSet = new Set(candles.map((c) => toTs(c.time) as number));
 
     const candleSeries = priceChart.addCandlestickSeries({
       upColor: "#10b981",
@@ -127,66 +140,30 @@ export default function MiniSymbolChart({ candles, trades, symbol }: Props) {
       priceLineVisible: false,
       lastValueVisible: true,
     });
-    candleSeries.setData(
-      candles.map((c) => ({ time: toTs(c.time), open: c.open, high: c.high, low: c.low, close: c.close })),
-    );
+    candleSeriesRef.current = candleSeries;
 
-    // VWAP
-    const vwapData = buildIntradayVwap(candles);
-    if (vwapData.length > 0) {
-      const vwapSeries = priceChart.addLineSeries({
-        color: "#f59e0b",
-        lineWidth: 1,
-        lineStyle: LineStyle.Dashed,
-        priceLineVisible: false,
-        lastValueVisible: false,
-        title: "VWAP",
-      });
-      vwapSeries.setData(vwapData);
-    }
-
-    // Trade markers
-    function nearestCandleTs(tradeIso: string): UTCTimestamp {
-      const snapped = snapToMinute(tradeIso) as number;
-      if (candleTsSet.has(snapped)) return snapped as UTCTimestamp;
-      let best = snapped;
-      let bestDist = Infinity;
-      for (const ts of candleTsSet) {
-        const d = Math.abs(ts - snapped);
-        if (d < bestDist) { bestDist = d; best = ts; }
-      }
-      return best as UTCTimestamp;
-    }
-
-    const symbolTrades = trades.filter((t) => t.symbol === symbol);
-    const markers: Array<{
-      time: UTCTimestamp;
-      position: "belowBar" | "aboveBar";
-      color: string;
-      shape: "arrowUp" | "arrowDown";
-      text: string;
-    }> = [];
-
-    for (const t of symbolTrades) {
-      if (!t.created_at) continue;
-      markers.push({
-        time: nearestCandleTs(t.created_at),
-        position: t.side === "buy" ? "belowBar" : "aboveBar",
-        color: t.side === "buy" ? "#10b981" : "#ef4444",
-        shape: t.side === "buy" ? "arrowUp" : "arrowDown",
-        text: `${t.side === "buy" ? "B" : "S"} $${t.price.toFixed(2)}`,
-      });
-    }
-
-    markers.sort((a, b) => (a.time as number) - (b.time as number));
-    if (markers.length > 0) candleSeries.setMarkers(markers);
+    const vwapSeries = priceChart.addLineSeries({
+      color: "#f59e0b",
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      title: "VWAP",
+    });
+    vwapSeriesRef.current = vwapSeries;
 
     // ── RSI chart ──
-    const rsiChart = createChart(rsiRef.current, { ...chartOpts, height: 70 });
+    const rsiChart = createChart(rsiRef.current, {
+      ...CHART_OPTS,
+      width,
+      height: 70,
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: true,
+        borderColor: "rgba(148,163,184,0.15)",
+      },
+    });
     rsiChartRef.current = rsiChart;
-
-    const closes = candles.map((c) => c.close);
-    const rsiValues = buildRsi(closes, 14);
 
     const rsiSeries = rsiChart.addLineSeries({
       color: "#a78bfa",
@@ -195,20 +172,12 @@ export default function MiniSymbolChart({ candles, trades, symbol }: Props) {
       lastValueVisible: false,
       title: "RSI",
     });
-    const rsiData = candles
-      .map((c, i) => rsiValues[i] !== null ? { time: toTs(c.time), value: rsiValues[i]! } : null)
-      .filter(Boolean) as { time: UTCTimestamp; value: number }[];
-    rsiSeries.setData(rsiData);
+    rsiSeriesRef.current = rsiSeries;
 
     rsiSeries.createPriceLine({ price: 70, color: "rgba(239,68,68,0.4)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "" });
     rsiSeries.createPriceLine({ price: 30, color: "rgba(16,185,129,0.4)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "" });
-
     rsiChart.priceScale("right").applyOptions({ autoScale: false, scaleMargins: { top: 0.05, bottom: 0.05 } });
     rsiSeries.applyOptions({ autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 100 } }) });
-
-    // Anchor series for RSI to keep time scales in sync
-    const anchorSeries = rsiChart.addLineSeries({ priceLineVisible: false, lastValueVisible: false, visible: false });
-    anchorSeries.setData(candles.map((c) => ({ time: toTs(c.time), value: 0 })));
 
     // Sync crosshairs & time scales
     let syncing = false;
@@ -225,20 +194,6 @@ export default function MiniSymbolChart({ candles, trades, symbol }: Props) {
       syncing = false;
     });
 
-    priceChart.subscribeCrosshairMove((param) => {
-      if (!param || !param.time) { rsiChart.clearCrosshairPosition(); return; }
-      const pt = rsiData.find((d) => (d.time as number) === (param.time as number));
-      if (pt) rsiChart.setCrosshairPosition(pt.value, pt.time, rsiSeries);
-    });
-    rsiChart.subscribeCrosshairMove((param) => {
-      if (!param || !param.time) { priceChart.clearCrosshairPosition(); return; }
-      const idx = candles.findIndex((c) => (toTs(c.time) as number) === (param.time as number));
-      if (idx >= 0) priceChart.setCrosshairPosition(candles[idx].close, toTs(candles[idx].time), candleSeries);
-    });
-
-    priceChart.timeScale().fitContent();
-    rsiChart.timeScale().fitContent();
-
     // Resize
     const observer = new ResizeObserver((entries) => {
       for (const e of entries) {
@@ -248,6 +203,9 @@ export default function MiniSymbolChart({ candles, trades, symbol }: Props) {
       }
     });
     observer.observe(priceRef.current);
+    observerRef.current = observer;
+
+    renderedCountRef.current = 0;
 
     return () => {
       observer.disconnect();
@@ -255,8 +213,120 @@ export default function MiniSymbolChart({ candles, trades, symbol }: Props) {
       rsiChart.remove();
       priceChartRef.current = null;
       rsiChartRef.current = null;
+      candleSeriesRef.current = null;
+      vwapSeriesRef.current = null;
+      rsiSeriesRef.current = null;
+      renderedCountRef.current = 0;
     };
-  }, [candles, trades, symbol]);
+  }, [symbol]);
+
+  // ── Update data incrementally ──
+  useEffect(() => {
+    const cs = candleSeriesRef.current;
+    const vs = vwapSeriesRef.current;
+    const rs = rsiSeriesRef.current;
+    const pc = priceChartRef.current;
+    if (!cs || !vs || !rs || !pc || candles.length === 0) return;
+
+    const prevCount = renderedCountRef.current;
+
+    if (prevCount === 0) {
+      // First render — set all data
+      cs.setData(
+        candles.map((c) => ({ time: toTs(c.time), open: c.open, high: c.high, low: c.low, close: c.close })),
+      );
+      vs.setData(buildIntradayVwap(candles));
+
+      const closes = candles.map((c) => c.close);
+      const rsiValues = buildRsi(closes, 14);
+      const rsiData = candles
+        .map((c, i) => rsiValues[i] !== null ? { time: toTs(c.time), value: rsiValues[i]! } : null)
+        .filter(Boolean) as { time: UTCTimestamp; value: number }[];
+      rs.setData(rsiData);
+
+      // Anchor series for RSI time scale
+      const rsiChart = rsiChartRef.current;
+      if (rsiChart) {
+        const anchor = rsiChart.addLineSeries({ priceLineVisible: false, lastValueVisible: false, visible: false });
+        anchor.setData(candles.map((c) => ({ time: toTs(c.time), value: 0 })));
+      }
+
+      pc.timeScale().scrollToRealTime();
+      renderedCountRef.current = candles.length;
+    } else if (candles.length > prevCount) {
+      // Incremental update — just update/add new bars
+      for (let i = prevCount; i < candles.length; i++) {
+        const c = candles[i];
+        cs.update({ time: toTs(c.time), open: c.open, high: c.high, low: c.low, close: c.close });
+      }
+
+      // Update VWAP for new bars
+      const vwapData = buildIntradayVwap(candles);
+      for (let i = Math.max(0, prevCount - 1); i < vwapData.length; i++) {
+        vs.update(vwapData[i]);
+      }
+
+      // Update RSI for new bars
+      const closes = candles.map((c) => c.close);
+      const rsiValues = buildRsi(closes, 14);
+      for (let i = Math.max(0, prevCount - 1); i < candles.length; i++) {
+        if (rsiValues[i] !== null) {
+          rs.update({ time: toTs(candles[i].time), value: rsiValues[i]! });
+        }
+      }
+
+      renderedCountRef.current = candles.length;
+    }
+  }, [candles]);
+
+  // ── Update trade markers ──
+  useEffect(() => {
+    const cs = candleSeriesRef.current;
+    if (!cs || candles.length === 0) return;
+
+    const candleTsSet = new Set(candles.map((c) => toTs(c.time) as number));
+    const symbolTrades = trades.filter((t) => t.symbol === symbol);
+    const firstTs = candles.length > 0 ? toTs(candles[0].time) as number : 0;
+    const lastTs = candles.length > 0 ? toTs(candles[candles.length - 1].time) as number : 0;
+    const markers: Array<{
+      time: UTCTimestamp;
+      position: "belowBar" | "aboveBar";
+      color: string;
+      shape: "arrowUp" | "arrowDown" | "square" | "circle";
+      text: string;
+    }> = [];
+
+    for (const t of symbolTrades) {
+      if (!t.created_at) continue;
+      const tradeTs = Math.floor(new Date(t.created_at).getTime() / 1000);
+      // Skip trades outside the chart's time range
+      if (tradeTs < firstTs - 5 || tradeTs > lastTs + 5) continue;
+      markers.push({
+        time: snapToNearest(t.created_at, candleTsSet),
+        position: t.side === "buy" ? "belowBar" : "aboveBar",
+        color: t.side === "buy" ? "#10b981" : "#ef4444",
+        shape: t.side === "buy" ? "arrowUp" : "arrowDown",
+        text: `${t.side === "buy" ? "B" : "S"} $${t.price.toFixed(2)}`,
+      });
+    }
+
+    // Session start marker
+    if (sessionStartTime) {
+      const startTs = Math.floor(new Date(sessionStartTime).getTime() / 1000);
+      if (startTs >= firstTs - 5 && startTs <= lastTs + 5) {
+        markers.push({
+          time: snapToNearest(sessionStartTime, candleTsSet),
+          position: "aboveBar",
+          color: "#3b82f6",
+          shape: "square",
+          text: "▶ Session",
+        });
+      }
+    }
+
+    markers.sort((a, b) => (a.time as number) - (b.time as number));
+    cs.setMarkers(markers);
+  }, [trades, candles.length, symbol, sessionStartTime]);
 
   if (candles.length === 0) {
     return <p style={{ color: "#64748b", fontSize: "0.8rem", margin: "0.5rem 0" }}>Waiting for candle data…</p>;

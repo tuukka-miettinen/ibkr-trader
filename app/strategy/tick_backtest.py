@@ -120,6 +120,10 @@ class CandleAggregator:
 
         return closed
 
+    def seed_candles(self, tf: Timeframe, candles: list[Candle]) -> None:
+        """Pre-load historical candles so indicators have warm-up data."""
+        self._completed[tf] = list(candles)
+
     def completed_candles(self, tf: Timeframe) -> list[Candle]:
         return self._completed[tf]
 
@@ -319,7 +323,9 @@ def run_tick_backtest(
                 and cash >= buy_amount
                 and len(position_entries) < base_config.max_entries
             ):
-                shares = buy_amount / tick.close
+                shares = int(buy_amount // tick.close)
+                if shares < 1:
+                    continue
                 cost = shares * tick.close
                 fee = _calc_commission(shares, cost, resolved.fee_per_share, resolved.fee_min_order, resolved.fee_max_pct)
                 cash -= cost + fee

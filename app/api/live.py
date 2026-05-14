@@ -95,6 +95,41 @@ async def create_session(body: CreateSessionRequest) -> dict:
     }
 
 
+@router.get("/test-symbol/{symbol}")
+async def test_symbol_connection(symbol: str) -> dict:
+    """Test IBKR connectivity and market data permissions for a symbol."""
+    from app.providers.ibkr_trading import IBKRTradingClient
+
+    # Reuse the live engine's client; create + persist one if needed
+    client = live_engine._client  # noqa: SLF001
+    if client is None:
+        client = IBKRTradingClient.from_env()
+        live_engine._client = client  # noqa: SLF001
+    try:
+        if not client.is_connected:
+            client.connect()
+    except Exception as exc:
+        return {
+            "symbol": symbol.upper(),
+            "ok": False,
+            "error": f"Cannot connect to IBKR: {exc}",
+            "exchange": None,
+            "last_price": None,
+        }
+
+    try:
+        result = client.test_symbol(symbol)
+    except Exception as exc:
+        result = {
+            "symbol": symbol.upper(),
+            "ok": False,
+            "error": str(exc),
+            "exchange": None,
+            "last_price": None,
+        }
+    return result
+
+
 @router.get("/sessions")
 async def list_sessions() -> dict:
     """List all live trading sessions."""
