@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 from app.db.database import get_db_context
 from app.db.ticks import TickRepository
@@ -25,13 +25,71 @@ EXT_CLOSE_HOUR = 24  # midnight = end of day
 MAX_DURATION_SECONDS = 1800  # 30 minutes per request
 REQUEST_DELAY_SECONDS = 2.0  # rate-limit spacing
 MAX_LOOKBACK_DAYS = 7
+DEFAULT_START_OFFSET_DAYS = 7
 
 
-def _trading_hours_for_date(date: datetime, extended: bool = False) -> list[datetime]:
-    """Return the start of each trading hour for a given date (UTC)."""
-    if date.weekday() >= 5:
+def _previous_weekday(day: date) -> date:
+    """Return the previous weekday before *day*."""
+    current = day - timedelta(days=1)
+    while current.weekday() >= 5:
+        current -= timedelta(days=1)
+    return current
+
+
+def _normalize_trading_date(day: date) -> date:
+    """Clamp weekends back to the previous weekday."""
+    current = day
+    while current.weekday() >= 5:
+        current -= timedelta(days=1)
+    return current
+
+
+def _session_start_time(extended: bool) -> time:
+    return EXT_OPEN_UTC if extended else MARKET_OPEN_UTC
+
+
+def _resolve_end_date(end_date: date | None, *, now: datetime, extended: bool) -> date:
+    """Resolve the requested end date to an actual trading day.
+
+    - Weekends roll back to the previous weekday.
+    - Future dates clamp to today.
+    - If the user targets today before the requested session has started,
+      fall back to the previous trading day.
+    """
+    candidate = min(end_date or now.date(), now.date())
+    candidate = _normalize_trading_date(candidate)
+
+    if candidate == now.date() and now.weekday() < 5:
+        current_time = now.astimezone(UTC).time().replace(tzinfo=None)
+        if current_time < _session_start_time(extended):
+            return _previous_weekday(candidate)
+
+    return candidate
+
+
+def _resolve_start_date(start_date: date | None, resolved_end_date: date) -> date:
+    """Resolve the requested start date so it is on/before the end date."""
+    candidate = min(start_date or (resolved_end_date - timedelta(days=DEFAULT_START_OFFSET_DAYS)), resolved_end_date)
+    candidate = _normalize_trading_date(candidate)
+    return min(candidate, resolved_end_date)
+
+
+def _trading_dates_for_range(start_date: date, end_date: date) -> list[date]:
+    """Return weekday dates in the inclusive range [start_date, end_date]."""
+    dates: list[date] = []
+    current = start_date
+    while current <= end_date:
+        if current.weekday() < 5:
+            dates.append(current)
+        current += timedelta(days=1)
+    return dates
+
+
+def _trading_hours_for_date(day_date: datetime, extended: bool = False) -> list[datetime]:
+    """Return the start of each trading hour for a given UTC date."""
+    if day_date.weekday() >= 5:
         return []
-    day = date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=UTC)
+    day = day_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=UTC)
     if extended:
         # Extended: 08:00-24:00 UTC (pre-market 4AM ET through after-hours 8PM ET)
         return [day.replace(hour=h) for h in range(8, 24)]
@@ -39,69 +97,72 @@ def _trading_hours_for_date(date: datetime, extended: bool = False) -> list[date
     return [day.replace(hour=h) for h in range(13, 20)]
 
 
-def _trading_dates_for_range(start_date: datetime, end_date: datetime) -> list[datetime]:
-    """Return weekday dates in the range [start_date, end_date]."""
-    dates = []
-    current = start_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=UTC)
-    end = end_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=UTC)
-    while current <= end:
-        if current.weekday() < 5:
-            dates.append(current)
-        current += timedelta(days=1)
-    return dates
-
-
 class TickFetcher:
     def __init__(self, provider: MarketDataProvider | None = None) -> None:
         self._provider = provider or get_market_data_provider()
         self._repo = TickRepository()
 
-    def _required_hours(self, days: int, extended: bool = False) -> list[datetime]:
-        """Compute the list of trading hours we expect data for over *days* trading days."""
-        if days > MAX_LOOKBACK_DAYS:
-            days = MAX_LOOKBACK_DAYS
+    def resolve_date_range(
+        self,
+        start_date: date | None,
+        end_date: date | None,
+        *,
+        extended: bool = False,
+        now: datetime | None = None,
+    ) -> tuple[date, date, list[date]]:
+        """Return the effective trading-date range used for a request."""
+        now = now or datetime.now(tz=UTC)
+        resolved_end = _resolve_end_date(end_date, now=now, extended=extended)
+        resolved_start = _resolve_start_date(start_date, resolved_end)
+        trading_dates = _trading_dates_for_range(resolved_start, resolved_end)
 
-        now = datetime.now(tz=UTC)
-        start_date = now - timedelta(days=days + 3)  # buffer for weekends
+        if len(trading_dates) > MAX_LOOKBACK_DAYS:
+            raise ValueError(f"Date range spans {len(trading_dates)} trading days; maximum is {MAX_LOOKBACK_DAYS}")
 
-        trading_dates = _trading_dates_for_range(start_date, now)
-        trading_dates = trading_dates[-days:]
+        return resolved_start, resolved_end, trading_dates
+
+    def _required_hours(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        *,
+        extended: bool = False,
+        now: datetime | None = None,
+    ) -> list[datetime]:
+        """Compute hourly chunks for the requested trading-date range."""
+        now = now or datetime.now(tz=UTC)
+        _, _, trading_dates = self.resolve_date_range(
+            start_date,
+            end_date,
+            extended=extended,
+            now=now,
+        )
+        current_hour = now.replace(minute=0, second=0, microsecond=0)
 
         hours: list[datetime] = []
-        for date in trading_dates:
-            for h in _trading_hours_for_date(date, extended=extended):
-                hour_end = h + timedelta(hours=1)
-                if hour_end <= now:
-                    hours.append(h)
-
-        # If today has no completed hours, extend lookback to get more history
-        if not hours and trading_dates:
-            extra_start = start_date - timedelta(days=3)
-            extra_dates = _trading_dates_for_range(extra_start, trading_dates[0] - timedelta(days=1))
-            for date in reversed(extra_dates):
-                for h in _trading_hours_for_date(date, extended=extended):
-                    hours.append(h)
-                if hours:
-                    break
-            hours.sort()
+        for trading_date in trading_dates:
+            trading_day = datetime.combine(trading_date, time.min, tzinfo=UTC)
+            for hour_start in _trading_hours_for_date(trading_day, extended=extended):
+                if hour_start.date() < now.date() or hour_start <= current_hour:
+                    hours.append(hour_start)
 
         return hours
 
     async def fetch_and_store(
         self,
         symbol: str,
-        days: int = 1,
+        start_date: date | None = None,
+        end_date: date | None = None,
         on_progress: callable | None = None,
         force: bool = False,
         extended: bool = False,
     ) -> dict:
-        """Fetch 5-second bars for *symbol* over the last *days* trading days.
+        """Fetch 5-second bars for *symbol* over the requested trading-date range.
 
         Returns a progress dict: {total_chunks, fetched_chunks, cached_chunks}.
         """
-        required_hours = self._required_hours(days, extended=extended)
+        required_hours = self._required_hours(start_date, end_date, extended=extended)
 
-        # Check which chunks we already have
         if force:
             existing_hours = set()
         else:
@@ -117,7 +178,6 @@ class TickFetcher:
             symbol, total, cached, len(missing_hours),
         )
 
-        # Fetch missing chunks by making 30-minute requests to IBKR
         fetched = 0
         for hour_start in missing_hours:
             bars = await self._fetch_hour(symbol, hour_start, use_rth=not extended)
@@ -152,27 +212,36 @@ class TickFetcher:
         }
 
     async def _fetch_hour(self, symbol: str, hour_start: datetime, use_rth: bool = True) -> list[Candle]:
-        """Fetch one hour of 5-second bars by making two 30-minute requests."""
+        """Fetch one hour of 5-second bars by making two 30-minute requests.
+
+        If the hour is still in progress, only request the elapsed portion so the
+        current trading day can be backtested from the session open without waiting
+        for the hour to complete.
+        """
         all_bars: list[Candle] = []
 
-        # Two 30-minute windows per hour
         hour_end = hour_start + timedelta(hours=1)
+        fetch_end = min(hour_end, datetime.now(tz=UTC))
+        if fetch_end <= hour_start:
+            return []
+
         for offset_minutes in [0, 30]:
             window_start = hour_start + timedelta(minutes=offset_minutes)
-            window_end = window_start + timedelta(minutes=30)
+            window_end = min(window_start + timedelta(minutes=30), fetch_end)
+            if window_end <= window_start:
+                continue
 
             try:
                 bars = await asyncio.to_thread(
                     self._fetch_window, symbol, window_start, window_end, use_rth,
                 )
-                # IBKR may return bars from a prior RTH session when using
-                # useRTH=True.  Keep only bars within the target hour.
-                bars = [b for b in bars if hour_start <= b.time < hour_end]
+                # IBKR may return bars from adjacent sessions. Keep only bars in the
+                # requested elapsed range for this chunk.
+                bars = [b for b in bars if hour_start <= b.time < fetch_end]
                 all_bars.extend(bars)
             except Exception:
                 logger.exception("Failed to fetch %s window %s", symbol, window_start.isoformat())
 
-            # Rate-limit spacing
             await asyncio.sleep(REQUEST_DELAY_SECONDS)
 
         return all_bars
@@ -251,9 +320,16 @@ class TickFetcher:
 
         return candles
 
-    async def load_ticks(self, symbol: str, days: int, extended: bool = False) -> list[Candle]:
+    async def load_ticks(
+        self,
+        symbol: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        *,
+        extended: bool = False,
+    ) -> list[Candle]:
         """Load stored tick data from the database."""
-        required_hours = self._required_hours(days, extended=extended)
+        required_hours = self._required_hours(start_date, end_date, extended=extended)
         if not required_hours:
             return []
 
@@ -267,11 +343,9 @@ class TickFetcher:
                 required_hours[-1],
             )
 
-        # Filter to only the exact required hours (the range query may include extra)
         chunks = [c for c in chunks if c.hour_start in required_set]
 
         candles = self._repo.chunks_to_candles(chunks)
-        # Sort by time — old chunks may contain phantom bars from adjacent days
         candles.sort(key=lambda c: c.time)
         return candles
 
@@ -281,7 +355,6 @@ class TickFetcher:
             available_hours = await self._repo.get_available_hours(session, symbol)
             range_result = await self._repo.get_available_range(session, symbol)
 
-        # Group by date
         dates: dict[str, int] = defaultdict(int)
         for h in available_hours:
             dates[h.isoformat().split("T", 1)[0]] += 1

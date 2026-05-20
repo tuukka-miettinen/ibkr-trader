@@ -5,7 +5,7 @@ import asyncio
 import json
 import re
 from collections import defaultdict
-from datetime import timedelta
+from datetime import date, timedelta
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -62,7 +62,8 @@ def on_tick(state):
 
 class FetchTicksRequest(BaseModel):
     symbol: str = "NBIS"
-    days: int = Field(default=7, ge=1, le=7)
+    start_date: date | None = None
+    end_date: date | None = None
     force: bool = False
     extended: bool = True
 
@@ -75,7 +76,8 @@ def _extract_strategy_name(script: str) -> str:
 
 class RunTickBacktestRequest(BaseModel):
     symbol: str = "NBIS"
-    days: int = Field(default=7, ge=1, le=7)
+    start_date: date | None = None
+    end_date: date | None = None
     extended: bool = True
     script: str = DEFAULT_TICK_SCRIPT
     description: str | None = None
@@ -99,10 +101,29 @@ async def fetch_ticks(body: FetchTicksRequest) -> dict:
     if not sym:
         raise HTTPException(status_code=422, detail="symbol is required")
 
-    result = await tick_fetcher.fetch_and_store(sym, body.days, force=body.force, extended=body.extended)
+    try:
+        resolved_start_date, resolved_end_date, trading_dates = tick_fetcher.resolve_date_range(
+            body.start_date,
+            body.end_date,
+            extended=body.extended,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    result = await tick_fetcher.fetch_and_store(
+        sym,
+        start_date=body.start_date,
+        end_date=body.end_date,
+        force=body.force,
+        extended=body.extended,
+    )
     return {
         "symbol": sym,
-        "days": body.days,
+        "start_date": body.start_date.isoformat() if body.start_date else None,
+        "end_date": body.end_date.isoformat() if body.end_date else None,
+        "resolved_start_date": resolved_start_date.isoformat(),
+        "resolved_end_date": resolved_end_date.isoformat(),
+        "trading_day_count": len(trading_dates),
         **result,
     }
 
@@ -122,6 +143,15 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
 
     on_tick_fn = compile_tick_script(body.script)
 
+    try:
+        resolved_start_date, resolved_end_date, trading_dates = tick_fetcher.resolve_date_range(
+            body.start_date,
+            body.end_date,
+            extended=body.extended,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     async def event_stream():
         def _sse(data: dict) -> str:
             return f"data: {json.dumps(data)}\n\n"
@@ -130,7 +160,10 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
         yield _sse({"stage": "fetch", "message": "Fetching data..."})
 
         fetch_result = await tick_fetcher.fetch_and_store(
-            sym, body.days, extended=body.extended,
+            sym,
+            start_date=body.start_date,
+            end_date=body.end_date,
+            extended=body.extended,
             on_progress=lambda p: None,  # progress tracked via total/cached
         )
         cached = fetch_result["cached_chunks"]
@@ -143,7 +176,12 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
 
         # Stage 2: Load ticks
         yield _sse({"stage": "load", "message": "Loading ticks..."})
-        ticks = await tick_fetcher.load_ticks(sym, body.days, extended=body.extended)
+        ticks = await tick_fetcher.load_ticks(
+            sym,
+            start_date=body.start_date,
+            end_date=body.end_date,
+            extended=body.extended,
+        )
         if not ticks:
             yield _sse({"stage": "error", "message": f"No tick data available for {sym}"})
             return
@@ -215,11 +253,15 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
                     "starting_capital": body.starting_capital,
                     "position_size": body.position_size,
                     "max_entries": body.max_entries,
+                    "start_date": body.start_date.isoformat() if body.start_date else None,
+                    "end_date": body.end_date.isoformat() if body.end_date else None,
+                    "resolved_start_date": resolved_start_date.isoformat(),
+                    "resolved_end_date": resolved_end_date.isoformat(),
                     "candle_timeframes": [tf.value for tf in body.candle_timeframes],
                 },
                 result_data=result_data,
                 mode="tick",
-                lookback_days=body.days,
+                lookback_days=len(trading_dates),
             )
 
         # Build 1-minute OHLCV candles with VWAP per trading day
@@ -323,6 +365,9 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
                 },
                 "run": {"id": run.id},
                 "tick_count": len(ticks),
+                "resolved_start_date": resolved_start_date.isoformat(),
+                "resolved_end_date": resolved_end_date.isoformat(),
+                "trading_day_count": len(trading_dates),
                 "trades": trades_data,
                 "open_entries": open_entries_data,
                 "price_series": dict(candles_by_day),

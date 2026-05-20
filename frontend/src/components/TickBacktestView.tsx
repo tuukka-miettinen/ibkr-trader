@@ -74,6 +74,22 @@ function formatSignedCurrency(v: number) {
 function formatSigned(v: number, suffix = "") {
   return `${v >= 0 ? "+" : ""}${v.toFixed(2)}${suffix}`;
 }
+function dateInputValue(input: Date) {
+  const year = input.getFullYear();
+  const month = String(input.getMonth() + 1).padStart(2, "0");
+  const day = String(input.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function todayInputValue() {
+  return dateInputValue(new Date());
+}
+
+function daysAgoInputValue(daysAgo: number) {
+  const now = new Date();
+  now.setDate(now.getDate() - daysAgo);
+  return dateInputValue(now);
+}
 
 const STORAGE_KEY = "tick-backtest-last-strategy";
 
@@ -94,7 +110,8 @@ function saveLastStrategy(name: string, script: string) {
 export default function TickBacktestView() {
   const saved = loadLastStrategy();
   const [symbol, setSymbol] = useState("NBIS");
-  const [days, setDays] = useState(7);
+  const [startDate, setStartDate] = useState(daysAgoInputValue(7));
+  const [endDate, setEndDate] = useState(todayInputValue());
   const [script, setScript] = useState(saved?.script ?? DEFAULT_TICK_SCRIPT);
   const [startingCapital, setStartingCapital] = useState(10000);
   const [positionSize, setPositionSize] = useState(1000);
@@ -113,6 +130,9 @@ export default function TickBacktestView() {
     algorithm: { id: string; name: string; version: number };
     run: { id: string };
     tick_count: number;
+    resolved_start_date?: string;
+    resolved_end_date?: string;
+    trading_day_count?: number;
     summary: Record<string, number>;
     daily: DailySummary[];
     trades: TradeData[];
@@ -148,12 +168,17 @@ export default function TickBacktestView() {
     setRunResult(null);
     setRunProgress("Starting...");
     try {
+      if (startDate > endDate) {
+        throw new Error("Start date must be on or before end date");
+      }
+
       const res = await fetch(`${API_BASE}/api/tick-backtest/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           symbol,
-          days,
+          start_date: startDate,
+          end_date: endDate,
           extended,
           script,
           starting_capital: startingCapital,
@@ -308,7 +333,7 @@ export default function TickBacktestView() {
 
   return (
     <div className="backtest-view">
-      {/* Top bar: symbol, days, cached status */}
+      {/* Top bar: symbol, date range, cached status */}
       <div className="backtest-config" style={{ marginBottom: "0.5rem" }}>
         <div className="backtest-inputs" style={{ alignItems: "center" }}>
           <label>
@@ -316,8 +341,12 @@ export default function TickBacktestView() {
             <input type="text" value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} style={{ width: 80 }} />
           </label>
           <label>
-            Days
-            <input type="number" min={1} max={7} value={days} onChange={(e) => setDays(Number(e.target.value))} style={{ width: 60 }} />
+            Start date
+            <input type="date" value={startDate} max={endDate} onChange={(e) => setStartDate(e.target.value)} />
+          </label>
+          <label>
+            End date
+            <input type="date" value={endDate} min={startDate} max={todayInputValue()} onChange={(e) => setEndDate(e.target.value)} />
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
             <input type="checkbox" checked={extended} onChange={(e) => setExtended(e.target.checked)} />
@@ -339,6 +368,9 @@ export default function TickBacktestView() {
           {!dataStatus?.dates?.length && symbol.trim() && (
             <span style={{ fontSize: "0.75rem", color: "#64748b" }}>No cached data</span>
           )}
+          <span style={{ fontSize: "0.75rem", color: "#64748b" }}>
+            Range uses full trading days from the start of the selected day through the end day.
+          </span>
         </div>
       </div>
 
@@ -474,6 +506,12 @@ export default function TickBacktestView() {
                 <span>Symbol</span>
                 <strong>{symbol}</strong>
               </div>
+              {runResult.resolved_start_date && runResult.resolved_end_date && (
+                <div>
+                  <span>Trading window</span>
+                  <strong>{runResult.resolved_start_date} → {runResult.resolved_end_date}</strong>
+                </div>
+              )}
               <div><span>Ticks</span><strong>{runResult.tick_count.toLocaleString()}</strong></div>
               <div><span>Trades</span><strong>{summary.num_trades}</strong></div>
               <div><span>Win Rate</span><strong>{summary.win_rate}%</strong></div>
