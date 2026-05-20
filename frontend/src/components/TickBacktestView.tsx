@@ -136,7 +136,7 @@ export default function TickBacktestView() {
   const [runError, setRunError] = useState<string | null>(null);
   const [runProgress, setRunProgress] = useState<string | null>(null);
   const [runResult, setRunResult] = useState<{
-    algorithm: { id: string; name: string; version: number };
+    algorithm: { id: string; name: string; version: number; is_favorite?: boolean };
     run: { id: string };
     tick_count: number;
     resolved_start_date?: string;
@@ -156,6 +156,7 @@ export default function TickBacktestView() {
   const [favorites, setFavorites] = useState<Algorithm[]>([]);
   const [showStrategyPicker, setShowStrategyPicker] = useState(false);
   const [chartDay, setChartDay] = useState<string | null>(null);
+  const [favoriteLoading, setFavoriteLoading] = useState(false);
 
   async function refreshDataStatus(sym?: string) {
     const s = sym ?? symbol;
@@ -253,7 +254,12 @@ export default function TickBacktestView() {
     }
   }
 
-  async function loadComparison() {
+  async function toggleComparison() {
+    if (showComparison) {
+      setShowComparison(false);
+      return;
+    }
+
     setShowComparison(true);
     try {
       const [algoRes, runRes] = await Promise.all([
@@ -282,8 +288,18 @@ export default function TickBacktestView() {
     } catch { /* ignore */ }
   }
 
-  async function loadStrategies() {
-    setShowStrategyPicker(true);
+  function dedupeLatestAlgorithms(list: Algorithm[]) {
+    const byName = new Map<string, Algorithm>();
+    for (const a of list) {
+      const existing = byName.get(a.name);
+      if (!existing || a.version > existing.version) {
+        byName.set(a.name, a);
+      }
+    }
+    return Array.from(byName.values());
+  }
+
+  async function refreshStrategyLists() {
     try {
       const [algoRes, favRes] = await Promise.all([
         fetch(`${API_BASE}/api/tick-backtest/algorithms`),
@@ -291,15 +307,7 @@ export default function TickBacktestView() {
       ]);
       if (algoRes.ok) {
         const data = await algoRes.json();
-        // Deduplicate: keep only the latest version per name
-        const byName = new Map<string, Algorithm>();
-        for (const a of data.algorithms || []) {
-          const existing = byName.get(a.name);
-          if (!existing || a.version > existing.version) {
-            byName.set(a.name, a);
-          }
-        }
-        setAlgorithms(Array.from(byName.values()));
+        setAlgorithms(dedupeLatestAlgorithms(data.algorithms || []));
       }
       if (favRes.ok) {
         const data = await favRes.json();
@@ -308,34 +316,52 @@ export default function TickBacktestView() {
     } catch { /* ignore */ }
   }
 
+  async function toggleStrategies() {
+    if (showStrategyPicker) {
+      setShowStrategyPicker(false);
+      return;
+    }
+
+    setShowStrategyPicker(true);
+    await refreshStrategyLists();
+  }
+
   async function toggleFavorite(algoId: string) {
     try {
       const res = await fetch(`${API_BASE}/api/tick-backtest/algorithms/${algoId}/favorite`, {
         method: "PATCH",
       });
       if (res.ok) {
-        // Refresh both lists
-        const [algoRes, favRes] = await Promise.all([
-          fetch(`${API_BASE}/api/tick-backtest/algorithms`),
-          fetch(`${API_BASE}/api/tick-backtest/algorithms/favorites`),
-        ]);
-        if (algoRes.ok) {
-          const data = await algoRes.json();
-          const byName = new Map<string, Algorithm>();
-          for (const a of data.algorithms || []) {
-            const existing = byName.get(a.name);
-            if (!existing || a.version > existing.version) {
-              byName.set(a.name, a);
-            }
-          }
-          setAlgorithms(Array.from(byName.values()));
-        }
-        if (favRes.ok) {
-          const data = await favRes.json();
-          setFavorites(data.algorithms || []);
-        }
+        await refreshStrategyLists();
       }
     } catch { /* ignore */ }
+  }
+
+  async function toggleCurrentFavorite() {
+    if (!runResult?.algorithm?.id) return;
+    setFavoriteLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/tick-backtest/algorithms/${runResult.algorithm.id}/favorite`, {
+        method: "PATCH",
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.detail || "Failed to update favorite");
+      }
+      const data = await res.json();
+      setRunResult((prev) => prev ? {
+        ...prev,
+        algorithm: {
+          ...prev.algorithm,
+          is_favorite: data.is_favorite,
+        },
+      } : prev);
+      await refreshStrategyLists();
+    } catch (err: unknown) {
+      setRunError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setFavoriteLoading(false);
+    }
   }
 
   const summary = runResult?.summary;
@@ -390,11 +416,20 @@ export default function TickBacktestView() {
             <button type="button" onClick={handleRun} disabled={runLoading}>
               {runLoading ? "Running…" : "▶ Run"}
             </button>
-            <button type="button" onClick={loadStrategies} title="Load strategy">
+            <button
+              type="button"
+              onClick={toggleStrategies}
+              title={showStrategyPicker ? "Hide strategy picker" : "Load strategy"}
+              style={{ fontWeight: showStrategyPicker ? 700 : 400 }}
+            >
               📂
             </button>
-            <button type="button" onClick={loadComparison}>
-              Compare
+            <button
+              type="button"
+              onClick={toggleComparison}
+              style={{ fontWeight: showComparison ? 700 : 400 }}
+            >
+              {showComparison ? "Hide Compare" : "Compare"}
             </button>
           </div>
           {showStrategyPicker && (
@@ -503,6 +538,23 @@ export default function TickBacktestView() {
             </div>
           )}
           {runError && <p className="error-banner">{runError}</p>}
+
+          {runResult && (
+            <div className="backtest-config" style={{ padding: "0.75rem 1rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
+                <div style={{ fontSize: "0.8rem", color: "#5a5a5a" }}>
+                  Saved strategy: <strong style={{ color: "#000000" }}>{runResult.algorithm.name} v{runResult.algorithm.version}</strong>
+                </div>
+                <button type="button" onClick={toggleCurrentFavorite} disabled={favoriteLoading}>
+                  {favoriteLoading
+                    ? "Saving…"
+                    : runResult.algorithm.is_favorite
+                      ? "★ In favorites"
+                      : "☆ Add to favorites"}
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Results summary */}
           {summary && (

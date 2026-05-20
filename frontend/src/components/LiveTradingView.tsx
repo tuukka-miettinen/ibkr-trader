@@ -53,6 +53,8 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
   const [formCapital, setFormCapital] = useState(10000);
   const [formPositionSize, setFormPositionSize] = useState(1000);
   const [formMaxEntries, setFormMaxEntries] = useState(5);
+  const [formMaxDailyEntries, setFormMaxDailyEntries] = useState(10);
+  const [formMaxTotalExposure, setFormMaxTotalExposure] = useState(50000);
   const [formMaxDailyLoss, setFormMaxDailyLoss] = useState(500);
   const [formOrderType, setFormOrderType] = useState<"market" | "limit">("market");
   const [algorithms, setAlgorithms] = useState<Algorithm[]>([]);
@@ -75,11 +77,13 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
   const [actionError, setActionError] = useState<string | null>(null);
   const [symbolTestResults, setSymbolTestResults] = useState<Record<string, { ok: boolean; exchange?: string; last_price?: number; error?: string; note?: string } | "loading">>({});
   const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
+  const [accountInfo, setAccountInfo] = useState<{ ok: boolean; net_liquidation?: number; total_cash?: number; buying_power?: number; error?: string } | null>(null);
 
-  // ── Load sessions + algorithms on mount ──
+  // ── Load sessions + favorite algorithms on mount ──
   useEffect(() => {
     refreshSessions();
     loadAlgorithms();
+    loadAccountInfo();
   }, []);
 
   async function refreshSessions() {
@@ -94,17 +98,31 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
 
   async function loadAlgorithms() {
     try {
-      const res = await fetch(`${API_BASE}/api/tick-backtest/algorithms`);
+      const res = await fetch(`${API_BASE}/api/tick-backtest/algorithms/favorites`);
       if (res.ok) {
         const data = await res.json();
         const algos = (data.algorithms ?? []) as Algorithm[];
-        // Deduplicate: keep latest version per name
+        // Deduplicate: keep latest favorite version per name
         const byName = new Map<string, Algorithm>();
         for (const a of algos) {
           const existing = byName.get(a.name);
           if (!existing || a.version > existing.version) byName.set(a.name, a);
         }
         setAlgorithms(Array.from(byName.values()));
+      } else {
+        setAlgorithms([]);
+      }
+    } catch {
+      setAlgorithms([]);
+    }
+  }
+
+  async function loadAccountInfo() {
+    try {
+      const res = await fetch(`${API_BASE}/api/live/account`);
+      if (res.ok) {
+        const data = await res.json();
+        setAccountInfo(data);
       }
     } catch { /* ignore */ }
   }
@@ -139,7 +157,9 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
           capital_per_symbol: formCapital,
           position_size: formPositionSize,
           max_entries: formMaxEntries,
+          max_daily_entries: formMaxDailyEntries,
           max_daily_loss: formMaxDailyLoss,
+          max_total_exposure: formMaxTotalExposure,
           order_type: formOrderType,
         }),
       });
@@ -195,6 +215,37 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
       const data = await res.json();
       await refreshSessions();
       navigate(`/paper-trading/${data.session.id}`);
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  async function renameSession(sessionId: string, currentName: string) {
+    const nextName = prompt("Rename session", currentName)?.trim();
+    if (!nextName || nextName === currentName) return;
+
+    setActionLoading(true);
+    setActionError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/live/sessions/${sessionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: nextName }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Failed to rename session");
+      }
+
+      setSessions((prev) => prev.map((s) => (s.id === sessionId ? { ...s, name: data.session.name } : s)));
+      setSessionDetail((prev) => (
+        prev && prev.session.id === sessionId
+          ? { ...prev, session: { ...prev.session, name: data.session.name } }
+          : prev
+      ));
+      await refreshSessions();
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -487,6 +538,49 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
 
       {actionError && <p className="error-banner" style={{ marginBottom: "0.5rem" }}>{actionError}</p>}
 
+      {/* ── Account summary bar ── */}
+      {accountInfo && accountInfo.ok && (
+        <div
+          style={{
+            display: "flex",
+            gap: "1.5rem",
+            alignItems: "center",
+            padding: "0.4rem 0.75rem",
+            background: "#f3f3f3",
+            border: "1px solid #000000",
+            marginBottom: "0.75rem",
+            fontSize: "0.85rem",
+          }}
+        >
+          <span style={{ fontWeight: 700, color: "#5a5a5a", fontSize: "0.75rem" }}>IBKR ACCOUNT</span>
+          {accountInfo.net_liquidation != null && (
+            <span>
+              <span style={{ color: "#5a5a5a" }}>Net Liq: </span>
+              <strong>{fmt$(accountInfo.net_liquidation)}</strong>
+            </span>
+          )}
+          {accountInfo.total_cash != null && (
+            <span>
+              <span style={{ color: "#5a5a5a" }}>Cash: </span>
+              <strong>{fmt$(accountInfo.total_cash)}</strong>
+            </span>
+          )}
+          {accountInfo.buying_power != null && (
+            <span>
+              <span style={{ color: "#5a5a5a" }}>Buying Power: </span>
+              <strong>{fmt$(accountInfo.buying_power)}</strong>
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={loadAccountInfo}
+            style={{ fontSize: "0.7rem", padding: "0.1rem 0.4rem", marginLeft: "auto" }}
+          >
+            ↻ Refresh
+          </button>
+        </div>
+      )}
+
       {/* ── Create form ── */}
       {showCreate && (
         <div
@@ -525,6 +619,14 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
               <input type="number" min={1} max={100} value={formMaxEntries} onChange={(e) => setFormMaxEntries(Number(e.target.value))} style={{ width: 60 }} />
             </label>
             <label>
+              Daily Entries / Strategy
+              <input type="number" min={1} max={1000} value={formMaxDailyEntries} onChange={(e) => setFormMaxDailyEntries(Number(e.target.value))} style={{ width: 60 }} />
+            </label>
+            <label>
+              Max Total Exposure
+              <input type="number" min={100} value={formMaxTotalExposure} onChange={(e) => setFormMaxTotalExposure(Number(e.target.value))} style={{ width: 100 }} />
+            </label>
+            <label>
               Max Daily Loss
               <input type="number" min={0} value={formMaxDailyLoss} onChange={(e) => setFormMaxDailyLoss(Number(e.target.value))} style={{ width: 100 }} />
             </label>
@@ -533,11 +635,12 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
           {/* Default strategy */}
           <div style={{ marginBottom: "0.75rem" }}>
             <label style={{ fontSize: "0.8rem" }}>
-              Default Strategy (applied when not set per symbol)
+              Default Strategy (favorites only)
               <select
                 value={formDefaultAlgo}
                 onChange={(e) => setFormDefaultAlgo(e.target.value)}
                 style={{ marginLeft: "0.5rem", minWidth: 200 }}
+                disabled={algorithms.length === 0}
               >
                 <option value="">— Select —</option>
                 {algorithms.map((a) => (
@@ -547,6 +650,11 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                 ))}
               </select>
             </label>
+            {algorithms.length === 0 && (
+              <div style={{ fontSize: "0.75rem", color: "#707070", marginTop: "0.35rem" }}>
+                No favorite strategies yet. In Tick Backtest, run a strategy and add it to favorites first.
+              </div>
+            )}
           </div>
 
           {/* Symbols */}
@@ -565,6 +673,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                   value={row.algorithm_id}
                   onChange={(e) => updateSymbolRow(idx, "algorithm_id", e.target.value)}
                   style={{ minWidth: 180 }}
+                  disabled={algorithms.length === 0}
                 >
                   <option value="">{formDefaultAlgo ? "(use default)" : "— Select strategy —"}</option>
                   {algorithms.map((a) => (
@@ -675,6 +784,9 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                             </button>
                           </>
                         )}
+                        <button type="button" onClick={() => renameSession(s.id, s.name)} disabled={actionLoading} style={{ fontSize: "0.75rem", marginLeft: "0.3rem" }}>
+                          ✎ Rename
+                        </button>
                         <button type="button" onClick={() => cloneSession(s.id)} disabled={actionLoading} style={{ fontSize: "0.75rem", marginLeft: "0.3rem" }}>
                           ⧉ Copy
                         </button>
@@ -747,6 +859,9 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                   </button>
                 </>
               )}
+              <button type="button" onClick={() => renameSession(activeSessionId, sessionDetail.session.name)} disabled={actionLoading}>
+                ✎ Rename
+              </button>
               <button type="button" onClick={() => cloneSession(activeSessionId)} disabled={actionLoading}>
                 ⧉ Copy
               </button>
@@ -759,7 +874,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
 
           {/* Portfolio summary */}
           {sessionDetail.total_pnl !== null && (
-            <div className="backtest-summary" style={{ marginBottom: "0.75rem" }}>
+            <div className="backtest-summary live-session-summary" style={{ marginBottom: "0.75rem" }}>
               <div>
                 <span>Total P&L</span>
                 <strong style={{ color: pnlColor(sessionDetail.total_pnl ?? 0) }}>
@@ -773,6 +888,10 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
               <div>
                 <span>Order Type</span>
                 <strong>{sessionDetail.session.order_type}</strong>
+              </div>
+              <div>
+                <span>Max Total Exposure</span>
+                <strong>{fmt$(sessionDetail.session.max_total_exposure)}</strong>
               </div>
               <div>
                 <span>Max Daily Loss</span>
@@ -795,6 +914,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                   <th style={{ textAlign: "right" }}>Daily P&L</th>
                   <th style={{ textAlign: "right" }}>Portfolio</th>
                   <th style={{ textAlign: "center" }}>B/S/T</th>
+                  <th style={{ textAlign: "center" }}>Daily</th>
                 </tr>
               </thead>
               <tbody>
@@ -856,6 +976,10 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                         <span style={{ color: NEGATIVE_COLOR }}>{sells}</span>
                         <span style={{ color: "#707070" }}>/</span>
                         <span style={{ color: "#000000" }}>{symTrades.length}</span>
+                      </td>
+                      <td style={{ textAlign: "center", fontSize: "0.85rem" }}>
+                        <span style={{ fontWeight: 600 }}>{s.daily_entry_count ?? 0}</span>
+                        <span style={{ color: "#707070" }}>/{s.max_daily_entries ?? "∞"}</span>
                       </td>
                     </tr>
                   );

@@ -170,6 +170,7 @@ export type LiveSession = {
   position_size: number;
   max_entries: number;
   max_daily_loss: number;
+  max_total_exposure: number;
   error_message: string | null;
   created_at: string | null;
   started_at: string | null;
@@ -184,6 +185,8 @@ export type LiveSessionSymbol = {
   allocated_capital: number;
   position_size: number;
   max_entries: number;
+  max_daily_entries: number;
+  daily_entry_count: number;
   current_shares: number;
   current_cost: number;
   cash_remaining: number;

@@ -131,6 +131,7 @@ class StrategyAlgorithm(Base):
     name = Column(String(255), nullable=False)
     version = Column(Integer, nullable=False, default=1)
     script = Column(Text, nullable=False)
+    script_hash = Column(String(64), nullable=False)
     description = Column(Text, nullable=True)
     is_favorite = Column(Boolean, nullable=False, default=False, server_default="false")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -138,6 +139,7 @@ class StrategyAlgorithm(Base):
     __table_args__ = (
         UniqueConstraint("name", "version", name="uq_strategy_name_version"),
         Index("ix_strategy_name", "name"),
+        Index("ix_strategy_name_hash", "name", "script_hash"),
     )
 
 
@@ -189,6 +191,7 @@ class LiveSession(Base):
     position_size = Column(Float, nullable=False, default=1000.0)
     max_entries = Column(Integer, nullable=False, default=5)
     max_daily_loss = Column(Float, nullable=False, default=500.0)
+    max_total_exposure = Column(Float, nullable=False, default=50000.0)
     strategy_state_json = Column(JSON, nullable=True)
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -212,6 +215,8 @@ class LiveSessionSymbol(Base):
     allocated_capital = Column(Float, nullable=False, default=10000.0)
     position_size = Column(Float, nullable=False, default=1000.0)
     max_entries = Column(Integer, nullable=False, default=5)
+    max_daily_entries = Column(Integer, nullable=False, default=10)
+    daily_entry_count = Column(Integer, nullable=False, default=0)
     current_shares = Column(Float, nullable=False, default=0.0)
     current_cost = Column(Float, nullable=False, default=0.0)
     cash_remaining = Column(Float, nullable=False, default=10000.0)

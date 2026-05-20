@@ -40,6 +40,8 @@ class SymbolRuntime:
     allocated_capital: float = 10000.0
     position_size: float = 1000.0
     max_entries: int = 5
+    max_daily_entries: int = 10
+    daily_entry_count: int = 0
     realized_pnl: float = 0.0
     daily_realized_pnl: float = 0.0
     strategy_state: dict = field(default_factory=dict)
@@ -125,6 +127,8 @@ class LiveTradingEngine:
                     allocated_capital=ss.allocated_capital,
                     position_size=ss.position_size,
                     max_entries=ss.max_entries,
+                    max_daily_entries=ss.max_daily_entries,
+                    daily_entry_count=ss.daily_entry_count,
                     realized_pnl=ss.realized_pnl,
                     daily_realized_pnl=ss.daily_realized_pnl,
                     strategy_state=strategy_state,
@@ -176,6 +180,7 @@ class LiveTradingEngine:
             "symbols": symbol_runtimes,
             "order_type": live_session.order_type,
             "max_daily_loss": live_session.max_daily_loss,
+            "max_total_exposure": live_session.max_total_exposure,
         }
 
         # Subscribe to real-time bars for each symbol
@@ -292,6 +297,8 @@ class LiveTradingEngine:
                 "unrealized_pnl": round(unrealized, 4),
                 "realized_pnl": round(rt.realized_pnl, 4),
                 "daily_realized_pnl": round(rt.daily_realized_pnl, 4),
+                "daily_entry_count": rt.daily_entry_count,
+                "max_daily_entries": rt.max_daily_entries,
                 "cash": round(rt.cash, 4),
                 "portfolio_value": round(portfolio_value, 4),
                 "tick_count": rt.tick_count,
@@ -506,6 +513,26 @@ class LiveTradingEngine:
             ):
                 return
 
+            # Check per-symbol daily entry limit
+            if rt.daily_entry_count >= rt.max_daily_entries:
+                logger.info(
+                    "[%s] Daily entry limit (%d) reached for %s — skipping buy",
+                    session_id[:8], rt.max_daily_entries, symbol,
+                )
+                return
+
+            # Check session-wide total exposure limit
+            total_exposure = sum(
+                s.position_cost for s in state["symbols"].values()
+            )
+            max_total_exposure = state.get("max_total_exposure", float("inf"))
+            if total_exposure + buy_amount > max_total_exposure:
+                logger.info(
+                    "[%s] Total exposure limit ($%.2f) would be exceeded — skipping buy for %s",
+                    session_id[:8], max_total_exposure, symbol,
+                )
+                return
+
             shares = math.floor(buy_amount / candle.close)
             if shares < 1:
                 return
@@ -545,6 +572,7 @@ class LiveTradingEngine:
                 "cost": round(cost, 4),
             }
             rt.position_entries.append(entry)
+            rt.daily_entry_count += 1
 
             # Persist to DB
             async with get_db_context() as db:
@@ -703,6 +731,7 @@ class LiveTradingEngine:
                 realized_pnl=round(rt.realized_pnl, 4),
                 unrealized_pnl=round(unrealized, 4),
                 daily_realized_pnl=round(rt.daily_realized_pnl, 4),
+                daily_entry_count=rt.daily_entry_count,
                 last_price=round(rt.last_price, 4),
                 strategy_state_json=strategy_json,
             )

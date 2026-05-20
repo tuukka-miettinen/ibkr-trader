@@ -1,28 +1,23 @@
 """IBKR trading client — places orders and streams real-time 5-second bars.
 
-Uses a separate connection (readonly=False, client_id=102) from the data-fetching
-provider so the two can coexist.
+Shares a single IB connection with IBKRMarketDataProvider via ibkr_shared,
+so only ONE connection to TWS / IB Gateway exists at any time.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import math
 import os
-import socket
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from typing import Callable, TypeVar
+from typing import Callable
 
-from ib_insync import IB, LimitOrder, MarketOrder, Stock, Trade
+from ib_insync import LimitOrder, MarketOrder, Stock, Trade
 
 from app.models.market_data import Candle, Timeframe
 from app.providers.base import MarketDataError
 
 logger = logging.getLogger(__name__)
-
-T = TypeVar("T")
 
 
 class IBKRTradingClient:
@@ -30,69 +25,37 @@ class IBKRTradingClient:
 
     def __init__(
         self,
-        host: str,
-        port: int,
-        client_id: int,
         exchange: str = "SMART",
         currency: str = "USD",
     ) -> None:
-        self._host = host
-        self._port = port
-        self._client_id = client_id
         self._exchange = exchange
         self._currency = currency
-        self._ib: IB | None = None
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ibkr-trade")
-        self._executor_thread_id: int | None = None
         self._bar_subscriptions: dict[str, object] = {}  # symbol → bars handle
         self._bar_callbacks: dict[str, Callable] = {}  # symbol → callback
         self._polling_timers: dict[str, threading.Event] = {}  # symbol → stop event
         self._error_callback: Callable[[int, int, str], None] | None = None
-        self._connected = False
 
     @classmethod
     def from_env(cls) -> "IBKRTradingClient":
         return cls(
-            host=os.environ.get("IBKR_HOST", "127.0.0.1"),
-            port=int(os.environ.get("IBKR_TRADE_PORT", os.environ.get("IBKR_PORT", "4004"))),
-            client_id=int(os.environ.get("IBKR_TRADE_CLIENT_ID", "102")),
             exchange=os.environ.get("IBKR_EXCHANGE", "SMART"),
             currency=os.environ.get("IBKR_CURRENCY", "USD"),
         )
 
-    # ── Connection ────────────────────────────────────────────────────
+    # ── Connection (delegates to shared module) ───────────────────────
 
     def connect(self) -> None:
-        self._run_on_ib_thread(self._connect_sync)
-
-    def _connect_sync(self) -> None:
-        ib = self._get_ib()
-        if ib.isConnected():
-            self._connected = True
-            return
-        if not self._port_open():
-            raise MarketDataError(
-                f"Cannot reach IBKR at {self._host}:{self._port}. "
-                "Start TWS / IB Gateway and enable API access."
-            )
-        ib.connect(self._host, self._port, clientId=self._client_id, readonly=False, timeout=10)
-        # Request delayed data (type 3) so accounts without real-time
-        # subscriptions still receive free 15-min delayed market data.
-        ib.reqMarketDataType(3)
-        self._connected = True
-        logger.info("IBKR trading client connected (client_id=%s, port=%s, delayed data enabled)", self._client_id, self._port)
+        from app.providers.ibkr_shared import run_on_ib_thread, ensure_connected
+        run_on_ib_thread(ensure_connected)
 
     @property
     def on_error(self) -> Callable[[int, int, str], None] | None:
-        """Return the current error callback, if any."""
         return self._error_callback
 
     @on_error.setter
     def on_error(self, callback: Callable[[int, int, str], None] | None) -> None:
-        """Set an error callback: ``callback(reqId, errorCode, errorString)``."""
         self._error_callback = callback
         ib = self._get_ib()
-        # Remove any existing handler and add new one
         ib.errorEvent.clear()
         if callback:
             def _on_ib_error(reqId, errorCode, errorString, *_args):
@@ -103,44 +66,52 @@ class IBKRTradingClient:
             ib.errorEvent += _on_ib_error
 
     def disconnect(self) -> None:
-        self._run_on_ib_thread(self._disconnect_sync)
+        from app.providers.ibkr_shared import run_on_ib_thread
+        run_on_ib_thread(self._disconnect_sync)
 
     def _disconnect_sync(self) -> None:
-        ib = self._get_ib()
         # Unsubscribe all real-time bars and stop polling
         for sym in list(self._bar_subscriptions):
             self._unsubscribe_bars_sync(sym)
         for sym in list(self._polling_timers):
             self._unsubscribe_bars_sync(sym)
-        if ib.isConnected():
-            ib.disconnect()
-        self._connected = False
-        logger.info("IBKR trading client disconnected")
+        # Don't disconnect the shared IB — other components may still use it
+        logger.info("IBKR trading client unsubscribed all bars (shared connection kept alive)")
 
     @property
     def is_connected(self) -> bool:
-        return self._connected and self._ib is not None and self._ib.isConnected()
+        from app.providers.ibkr_shared import is_connected
+        return is_connected()
+
+    # ── Helpers ───────────────────────────────────────────────────────
+
+    def _get_ib(self):
+        from app.providers.ibkr_shared import get_ib
+        return get_ib()
+
+    def _run_on_ib_thread(self, fn):
+        from app.providers.ibkr_shared import run_on_ib_thread
+        return run_on_ib_thread(fn)
+
+    def _contract(self, symbol: str) -> Stock:
+        return Stock(symbol.upper(), self._exchange, self._currency)
 
     # ── Real-time 5-second bars (with polling fallback) ─────────────
 
     def subscribe_realtime_bars(self, symbol: str, callback: Callable[[Candle], None]) -> None:
-        """Subscribe to 5-second OHLCV bars for *symbol*.
-
-        Tries real-time bars first.  If the account lacks market-data
-        permissions (error 420), automatically falls back to polling
-        ``reqHistoricalData`` every 5 seconds.
-        """
         self._run_on_ib_thread(lambda: self._subscribe_bars_sync(symbol, callback))
 
     def _subscribe_bars_sync(self, symbol: str, callback: Callable[[Candle], None]) -> None:
         sym = symbol.upper()
         if sym in self._bar_subscriptions or sym in self._polling_timers:
-            return  # already subscribed
+            return
+
+        from app.providers.ibkr_shared import ensure_connected
+        ensure_connected()
 
         contract = self._contract(sym)
         ib = self._get_ib()
 
-        # Track whether the subscription was rejected so we can fall back
         error_event = threading.Event()
         got_bar = threading.Event()
 
@@ -172,12 +143,10 @@ class IBKRTradingClient:
         bars = ib.reqRealTimeBars(contract, barSize=5, whatToShow="TRADES", useRTH=False)
         bars.updateEvent += _on_bar_update
 
-        # Give IBKR a moment to respond with an error or first bar
         ib.sleep(2)
         ib.errorEvent -= _on_error
 
         if error_event.is_set() and not got_bar.is_set():
-            # Real-time rejected — cancel and fall back to polling
             ib.cancelRealTimeBars(bars)
             logger.warning(
                 "Real-time bars unavailable for %s — falling back to historical polling",
@@ -190,7 +159,6 @@ class IBKRTradingClient:
             logger.info("Subscribed to real-time bars for %s", sym)
 
     def _start_polling(self, symbol: str, callback: Callable[[Candle], None]) -> None:
-        """Poll ``reqHistoricalData`` every 5 seconds as a fallback."""
         stop_event = threading.Event()
         self._polling_timers[symbol] = stop_event
         self._bar_callbacks[symbol] = callback
@@ -208,22 +176,19 @@ class IBKRTradingClient:
                             logger.exception("Error in polling callback for %s", symbol)
                 except Exception:
                     logger.exception("Polling error for %s", symbol)
-                stop_event.wait(5)  # sleep 5 seconds between polls
+                stop_event.wait(5)
 
         t = threading.Thread(target=_poll_loop, name=f"poll-{symbol}", daemon=True)
         t.start()
         logger.info("Started historical polling for %s (5s interval)", symbol)
 
     def is_polling_symbol(self, symbol: str) -> bool:
-        """Return True if *symbol* is using polling (delayed data) instead of real-time."""
         return symbol.upper() in self._polling_timers
 
     def _poll_latest_bar(self, symbol: str) -> Candle | None:
-        """Fetch the latest 5-sec bar via ``reqHistoricalData``."""
         sym = symbol.upper()
         contract = self._contract(sym)
         ib = self._get_ib()
-        # Use 1800 S (30 min) window to cover the ~15-min delayed data lag
         bars = ib.reqHistoricalData(
             contract,
             endDateTime="",
@@ -256,6 +221,19 @@ class IBKRTradingClient:
     def unsubscribe_realtime_bars(self, symbol: str) -> None:
         self._run_on_ib_thread(lambda: self._unsubscribe_bars_sync(symbol))
 
+    def _unsubscribe_bars_sync(self, symbol: str) -> None:
+        sym = symbol.upper()
+        bars = self._bar_subscriptions.pop(sym, None)
+        self._bar_callbacks.pop(sym, None)
+        if bars is not None:
+            ib = self._get_ib()
+            ib.cancelRealTimeBars(bars)
+            logger.info("Unsubscribed from real-time bars for %s", sym)
+        stop_event = self._polling_timers.pop(sym, None)
+        if stop_event is not None:
+            stop_event.set()
+            logger.info("Stopped historical polling for %s", sym)
+
     # ── Historical candle fetch (for aggregator warm-up) ──────────────
 
     _BAR_SIZE_MAP = {
@@ -267,7 +245,6 @@ class IBKRTradingClient:
     def get_historical_candles(
         self, symbol: str, timeframe: Timeframe, duration: str = "1 D"
     ) -> list[Candle]:
-        """Fetch historical candles for pre-loading the live aggregator."""
         return self._run_on_ib_thread(
             lambda: self._get_historical_sync(symbol, timeframe, duration)
         )
@@ -279,6 +256,9 @@ class IBKRTradingClient:
         bar_size = self._BAR_SIZE_MAP.get(timeframe)
         if bar_size is None:
             return []
+
+        from app.providers.ibkr_shared import ensure_connected
+        ensure_connected()
 
         contract = self._contract(sym)
         ib = self._get_ib()
@@ -314,36 +294,19 @@ class IBKRTradingClient:
             ))
         return candles
 
-    def _unsubscribe_bars_sync(self, symbol: str) -> None:
-        sym = symbol.upper()
-        # Stop real-time bars
-        bars = self._bar_subscriptions.pop(sym, None)
-        self._bar_callbacks.pop(sym, None)
-        if bars is not None:
-            ib = self._get_ib()
-            ib.cancelRealTimeBars(bars)
-            logger.info("Unsubscribed from real-time bars for %s", sym)
-        # Stop polling
-        stop_event = self._polling_timers.pop(sym, None)
-        if stop_event is not None:
-            stop_event.set()
-            logger.info("Stopped historical polling for %s", sym)
-
     # ── Connection test ───────────────────────────────────────────────
 
     def test_symbol(self, symbol: str) -> dict:
-        """Test whether market data is available for *symbol*.
-
-        Returns a dict with connection status, last price, and exchange info.
-        """
         return self._run_on_ib_thread(lambda: self._test_symbol_sync(symbol))
 
     def _test_symbol_sync(self, symbol: str) -> dict:
+        from app.providers.ibkr_shared import ensure_connected
+        ensure_connected()
+
         sym = symbol.upper()
         contract = self._contract(sym)
         ib = self._get_ib()
 
-        # Qualify contract to check it's valid
         qualified = ib.qualifyContracts(contract)
         if not qualified:
             return {
@@ -356,7 +319,6 @@ class IBKRTradingClient:
         c = qualified[0]
         exchange = c.primaryExchange or c.exchange
 
-        # Try fetching historical data — works with delayed data
         last_price = None
         has_data = False
         try:
@@ -403,7 +365,6 @@ class IBKRTradingClient:
     # ── Order execution ───────────────────────────────────────────────
 
     def place_market_order(self, symbol: str, action: str, quantity: float) -> Trade:
-        """Place a market order.  *action* is 'BUY' or 'SELL'."""
         return self._run_on_ib_thread(
             lambda: self._place_order_sync(symbol, action, quantity, "market")
         )
@@ -411,7 +372,6 @@ class IBKRTradingClient:
     def place_limit_order(
         self, symbol: str, action: str, quantity: float, limit_price: float
     ) -> Trade:
-        """Place a limit order at *limit_price*."""
         return self._run_on_ib_thread(
             lambda: self._place_order_sync(symbol, action, quantity, "limit", limit_price)
         )
@@ -424,6 +384,9 @@ class IBKRTradingClient:
         order_type: str,
         limit_price: float | None = None,
     ) -> Trade:
+        from app.providers.ibkr_shared import ensure_connected
+        ensure_connected()
+
         contract = self._contract(symbol.upper())
         ib = self._get_ib()
 
@@ -456,6 +419,9 @@ class IBKRTradingClient:
         return self._run_on_ib_thread(self._get_positions_sync)
 
     def _get_positions_sync(self) -> list[dict]:
+        from app.providers.ibkr_shared import ensure_connected
+        ensure_connected()
+
         ib = self._get_ib()
         ib.reqPositions()
         ib.sleep(0.5)
@@ -473,6 +439,9 @@ class IBKRTradingClient:
         return self._run_on_ib_thread(self._get_account_summary_sync)
 
     def _get_account_summary_sync(self) -> dict:
+        from app.providers.ibkr_shared import ensure_connected
+        ensure_connected()
+
         ib = self._get_ib()
         summary = ib.accountSummary()
         result = {}
@@ -480,39 +449,3 @@ class IBKRTradingClient:
             if item.tag in ("NetLiquidation", "TotalCashValue", "BuyingPower"):
                 result[item.tag] = float(item.value)
         return result
-
-    # ── Internal helpers ──────────────────────────────────────────────
-
-    def _run_on_ib_thread(self, fn: Callable[[], T]) -> T:
-        if threading.get_ident() == self._executor_thread_id:
-            return fn()
-        future = self._executor.submit(self._run_with_loop, fn)
-        return future.result()
-
-    def _run_with_loop(self, fn: Callable[[], T]) -> T:
-        self._executor_thread_id = threading.get_ident()
-        self._ensure_thread_loop()
-        return fn()
-
-    def _get_ib(self) -> IB:
-        if self._ib is None:
-            self._ib = IB()
-        return self._ib
-
-    def _ensure_thread_loop(self) -> None:
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = None
-        if loop is None or loop.is_running():
-            asyncio.set_event_loop(asyncio.new_event_loop())
-
-    def _port_open(self) -> bool:
-        try:
-            with socket.create_connection((self._host, self._port), timeout=2):
-                return True
-        except OSError:
-            return False
-
-    def _contract(self, symbol: str) -> Stock:
-        return Stock(symbol.upper(), self._exchange, self._currency)

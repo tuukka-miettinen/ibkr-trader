@@ -362,6 +362,7 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
                     "id": algo.id,
                     "name": algo.name,
                     "version": algo.version,
+                    "is_favorite": algo.is_favorite,
                 },
                 "run": {"id": run.id},
                 "tick_count": len(ticks),

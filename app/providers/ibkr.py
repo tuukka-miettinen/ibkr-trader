@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import math
 import os
-import socket
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Callable, TypeVar
 
-from ib_insync import IB, Stock
+from ib_insync import Stock
 
 from app.models.market_data import Candle, Timeframe
 from app.providers.base import MarketDataError, MarketDataProvider
@@ -30,36 +26,25 @@ T = TypeVar("T")
 class IBKRMarketDataProvider(MarketDataProvider):
     def __init__(
         self,
-        host: str,
-        port: int,
-        client_id: int,
         exchange: str,
         currency: str,
         use_rth: bool,
     ) -> None:
-        self._host = host
-        self._port = port
-        self._client_id = client_id
         self._exchange = exchange
         self._currency = currency
         self._use_rth = use_rth
-        self._ib: IB | None = None
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ibkr-provider")
-        self._executor_thread_id: int | None = None
 
     @classmethod
     def from_env(cls) -> "IBKRMarketDataProvider":
         return cls(
-            host=os.environ.get("IBKR_HOST", "127.0.0.1"),
-            port=int(os.environ.get("IBKR_PORT", "7497")),
-            client_id=int(os.environ.get("IBKR_CLIENT_ID", "101")),
             exchange=os.environ.get("IBKR_EXCHANGE", "SMART"),
             currency=os.environ.get("IBKR_CURRENCY", "USD"),
             use_rth=os.environ.get("IBKR_USE_RTH", "false").strip().lower() == "true",
         )
 
     def get_history(self, symbol: str, timeframe: Timeframe, limit: int) -> list[Candle]:
-        return self._run_on_ib_thread(lambda: self._get_history_sync(symbol, timeframe, limit))
+        from app.providers.ibkr_shared import run_on_ib_thread
+        return run_on_ib_thread(lambda: self._get_history_sync(symbol, timeframe, limit))
 
     def get_history_since(
         self,
@@ -70,7 +55,8 @@ class IBKRMarketDataProvider(MarketDataProvider):
     ) -> list[Candle]:
         if start_time is None:
             return self.get_history(symbol, timeframe, limit)
-        return self._run_on_ib_thread(lambda: self._get_history_since_sync(symbol, timeframe, start_time, limit))
+        from app.providers.ibkr_shared import run_on_ib_thread
+        return run_on_ib_thread(lambda: self._get_history_since_sync(symbol, timeframe, start_time, limit))
 
     def _get_history_sync(self, symbol: str, timeframe: Timeframe, limit: int) -> list[Candle]:
         contract = self._contract(symbol)
@@ -121,7 +107,8 @@ class IBKRMarketDataProvider(MarketDataProvider):
         return [candle for candle in candles if candle.time > start_time][-limit:]
 
     def get_live_price(self, symbol: str) -> float | None:
-        return self._run_on_ib_thread(lambda: self._get_live_price_sync(symbol))
+        from app.providers.ibkr_shared import run_on_ib_thread
+        return run_on_ib_thread(lambda: self._get_live_price_sync(symbol))
 
     def _get_live_price_sync(self, symbol: str) -> float | None:
         contract = self._contract(symbol)
@@ -139,61 +126,15 @@ class IBKRMarketDataProvider(MarketDataProvider):
 
         return round(float(price), 2)
 
-    def _run_on_ib_thread(self, fn: Callable[[], T]) -> T:
-        if threading.get_ident() == self._executor_thread_id:
-            return fn()
-        future = self._executor.submit(self._run_with_loop, fn)
-        return future.result()
+    # ── Helpers (delegate to shared module) ───────────────────────────
 
-    def _run_with_loop(self, fn: Callable[[], T]) -> T:
-        self._executor_thread_id = threading.get_ident()
-        self._ensure_thread_loop()
-        return fn()
-
-    def _get_ib(self) -> IB:
-        """Get thread-local IB instance, creating one if needed."""
-        if self._ib is None:
-            self._ib = IB()
-        return self._ib
-
-    def _ensure_thread_loop(self) -> None:
-        """Guarantee the calling thread owns a fresh, non-running asyncio event loop.
-
-        uvloop (used by uvicorn) leaks into ThreadPoolExecutor worker threads via the
-        event-loop policy.  ib_insync calls asyncio.get_event_loop() and, if the
-        loop reports is_running()==True, tries to schedule a Task on it instead of
-        calling run_until_complete() — causing an immediate disconnect.
-        """
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = None
-        if loop is None or loop.is_running():
-            asyncio.set_event_loop(asyncio.new_event_loop())
+    def _get_ib(self):
+        from app.providers.ibkr_shared import get_ib
+        return get_ib()
 
     def _ensure_connected(self) -> None:
-        ib = self._get_ib()
-        if ib.isConnected():
-            return
-        if not self._port_open():
-            raise MarketDataError(
-                f"Failed to connect to IBKR at {self._host}:{self._port}. "
-                "Start TWS or IB Gateway, enable API access, and verify market-data subscriptions."
-            )
-        try:
-            ib.connect(self._host, self._port, clientId=self._client_id, readonly=True, timeout=5)
-        except Exception as exc:  # pragma: no cover - connection error path depends on local IBKR runtime
-            raise MarketDataError(
-                f"Failed to connect to IBKR at {self._host}:{self._port}. "
-                "Start TWS or IB Gateway, enable API access, and verify market-data subscriptions."
-            ) from exc
-
-    def _port_open(self) -> bool:
-        try:
-            with socket.create_connection((self._host, self._port), timeout=2):
-                return True
-        except OSError:
-            return False
+        from app.providers.ibkr_shared import ensure_connected
+        ensure_connected()
 
     def _contract(self, symbol: str) -> Stock:
         return Stock(symbol.upper(), self._exchange, self._currency)
@@ -217,20 +158,16 @@ class IBKRMarketDataProvider(MarketDataProvider):
         )
 
     def _duration_str(self, limit: int, timeframe: Timeframe) -> str:
-        # IBKR durationStr units: S=seconds, D=days, W=weeks, M=months, Y=years
-        # Convert bar count to calendar days, not naive wall-clock time.
-        # RTH is 6.5 hours; bars only appear during trading hours, so
-        # N bars of 5m ≠ N*5 minutes of calendar time.
         step = self._step(timeframe)
-        rth_seconds = 6 * 3600 + 30 * 60  # 23400s = 6.5 hours
+        rth_seconds = 6 * 3600 + 30 * 60
         bars_per_day = max(rth_seconds // int(step.total_seconds()), 1)
         trading_days = math.ceil(max(limit, 1) / bars_per_day)
-        # 5 trading days ≈ 7 calendar days; +1 buffer for partial days/holidays
         calendar_days = math.ceil(trading_days * 7 / 5) + 1
         return self._duration_for_delta(timedelta(days=max(calendar_days, 1)))
 
     def _duration_since_str(self, start_time: datetime, timeframe: Timeframe) -> str:
-        current_time = datetime.now(tz=UTC)
+        from app.models.market_data import utc_now
+        current_time = utc_now()
         normalized_start = start_time if start_time.tzinfo is not None else start_time.replace(tzinfo=UTC)
         total = max(current_time - normalized_start, self._step(timeframe)) + self._step(timeframe)
         return self._duration_for_delta(total)

@@ -42,6 +42,7 @@ class LiveRepository:
         position_size: float = 1000.0,
         max_entries: int = 5,
         max_daily_loss: float = 500.0,
+        max_total_exposure: float = 50000.0,
     ) -> LiveSession:
         live = LiveSession(
             id=_uuid(),
@@ -51,6 +52,7 @@ class LiveRepository:
             position_size=position_size,
             max_entries=max_entries,
             max_daily_loss=max_daily_loss,
+            max_total_exposure=max_total_exposure,
         )
         session.add(live)
         await session.commit()
@@ -106,6 +108,24 @@ class LiveRepository:
         result = await session.execute(stmt)
         return list(result.scalars().all())
 
+    async def rename_session(
+        self,
+        session: AsyncSession,
+        session_id: str,
+        name: str,
+    ) -> LiveSession | None:
+        cleaned_name = name.strip()
+        if not cleaned_name:
+            raise ValueError("Session name cannot be empty")
+        stmt = (
+            update(LiveSession)
+            .where(LiveSession.id == session_id)
+            .values(name=cleaned_name)
+        )
+        await session.execute(stmt)
+        await session.commit()
+        return await self.get_session(session, session_id)
+
     # ── Session symbols ───────────────────────────────────────────────
 
     async def add_session_symbol(
@@ -118,6 +138,7 @@ class LiveRepository:
         allocated_capital: float,
         position_size: float,
         max_entries: int,
+        max_daily_entries: int = 10,
     ) -> LiveSessionSymbol:
         sym = LiveSessionSymbol(
             id=_uuid(),
@@ -127,6 +148,7 @@ class LiveRepository:
             allocated_capital=allocated_capital,
             position_size=position_size,
             max_entries=max_entries,
+            max_daily_entries=max_daily_entries,
             cash_remaining=allocated_capital,
         )
         session.add(sym)
@@ -165,6 +187,7 @@ class LiveRepository:
         realized_pnl: float | None = None,
         unrealized_pnl: float | None = None,
         daily_realized_pnl: float | None = None,
+        daily_entry_count: int | None = None,
         last_price: float | None = None,
         strategy_state_json: dict | None = ...,
     ) -> None:
@@ -181,6 +204,8 @@ class LiveRepository:
             values["unrealized_pnl"] = unrealized_pnl
         if daily_realized_pnl is not None:
             values["daily_realized_pnl"] = daily_realized_pnl
+        if daily_entry_count is not None:
+            values["daily_entry_count"] = daily_entry_count
         if last_price is not None:
             values["last_price"] = last_price
         if strategy_state_json is not ...:
@@ -195,7 +220,7 @@ class LiveRepository:
         stmt = (
             update(LiveSessionSymbol)
             .where(LiveSessionSymbol.session_id == session_id)
-            .values(daily_realized_pnl=0.0)
+            .values(daily_realized_pnl=0.0, daily_entry_count=0)
         )
         await session.execute(stmt)
         await session.commit()

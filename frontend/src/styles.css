@@ -427,7 +427,30 @@ textarea {
 }
 
 .backtest-summary {
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.live-session-summary {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.live-session-summary > div {
+  display: grid;
+  grid-template-rows: minmax(1.1rem, auto) auto;
+  gap: 4px;
+  align-content: start;
+}
+
+.live-session-summary span,
+.live-session-summary strong {
+  display: block;
+  line-height: 1.2;
+}
+
+.live-session-summary span {
+  white-space: nowrap;
 }
 
 .backtest-chart {

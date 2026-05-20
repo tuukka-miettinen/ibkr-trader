@@ -40,13 +40,19 @@ class CreateSessionRequest(BaseModel):
     capital_per_symbol: float = Field(default=10000.0, gt=0)
     position_size: float = Field(default=1000.0, gt=0)
     max_entries: int = Field(default=5, ge=1, le=100)
+    max_daily_entries: int = Field(default=10, ge=1, le=1000)
     max_daily_loss: float = Field(default=500.0, gt=0)
+    max_total_exposure: float = Field(default=50000.0, gt=0)
     order_type: str = Field(default="market", pattern=r"^(market|limit)$")
 
 
 class CompareSessionRequest(BaseModel):
     symbol: str
     minutes: int = Field(default=30, ge=1, le=240)
+
+
+class RenameSessionRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
 
 
 # ── REST endpoints ───────────────────────────────────────────────────
@@ -76,6 +82,7 @@ async def create_session(body: CreateSessionRequest) -> dict:
             position_size=body.position_size,
             max_entries=body.max_entries,
             max_daily_loss=body.max_daily_loss,
+            max_total_exposure=body.max_total_exposure,
         )
 
         symbols_out = []
@@ -88,6 +95,7 @@ async def create_session(body: CreateSessionRequest) -> dict:
                 allocated_capital=body.capital_per_symbol,
                 position_size=body.position_size,
                 max_entries=body.max_entries,
+                max_daily_entries=body.max_daily_entries,
             )
             symbols_out.append({
                 "id": ss.id,
@@ -105,6 +113,7 @@ async def create_session(body: CreateSessionRequest) -> dict:
             "position_size": live_session.position_size,
             "max_entries": live_session.max_entries,
             "max_daily_loss": live_session.max_daily_loss,
+            "max_total_exposure": live_session.max_total_exposure,
             "created_at": _iso_utc(live_session.created_at),
         },
         "symbols": symbols_out,
@@ -146,6 +155,33 @@ async def test_symbol_connection(symbol: str) -> dict:
     return result
 
 
+@router.get("/account")
+async def get_account_info() -> dict:
+    """Return IBKR account summary (net liquidation, cash, buying power)."""
+    from app.providers.ibkr_trading import IBKRTradingClient
+
+    client = live_engine._client  # noqa: SLF001
+    if client is None:
+        client = IBKRTradingClient.from_env()
+        live_engine._client = client  # noqa: SLF001
+    try:
+        if not client.is_connected:
+            client.connect()
+    except Exception as exc:
+        return {"ok": False, "error": f"Cannot connect to IBKR: {exc}"}
+
+    try:
+        summary = client.get_account_summary()
+        return {
+            "ok": True,
+            "net_liquidation": summary.get("NetLiquidation"),
+            "total_cash": summary.get("TotalCashValue"),
+            "buying_power": summary.get("BuyingPower"),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 @router.get("/sessions")
 async def list_sessions() -> dict:
     """List all live trading sessions."""
@@ -171,6 +207,37 @@ async def list_sessions() -> dict:
     }
 
 
+@router.patch("/sessions/{session_id}")
+async def rename_session(session_id: str, body: RenameSessionRequest) -> dict:
+    """Rename an existing live trading session."""
+    try:
+        async with get_db_context() as db:
+            live_session = await repo.rename_session(db, session_id, body.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if live_session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return {
+        "session": {
+            "id": live_session.id,
+            "name": live_session.name,
+            "status": live_session.status,
+            "order_type": live_session.order_type,
+            "position_size": live_session.position_size,
+            "max_entries": live_session.max_entries,
+            "max_daily_loss": live_session.max_daily_loss,
+            "max_total_exposure": live_session.max_total_exposure,
+            "error_message": live_session.error_message,
+            "created_at": _iso_utc(live_session.created_at),
+            "started_at": _iso_utc(live_session.started_at),
+            "stopped_at": _iso_utc(live_session.stopped_at),
+            "is_running": live_engine.is_session_running(live_session.id),
+        }
+    }
+
+
 @router.get("/sessions/{session_id}")
 async def get_session(session_id: str) -> dict:
     """Get detailed session info including live state if running."""
@@ -191,6 +258,8 @@ async def get_session(session_id: str) -> dict:
             "allocated_capital": ss.allocated_capital,
             "position_size": ss.position_size,
             "max_entries": ss.max_entries,
+            "max_daily_entries": ss.max_daily_entries,
+            "daily_entry_count": ss.daily_entry_count,
             "current_shares": ss.current_shares,
             "current_cost": ss.current_cost,
             "cash_remaining": ss.cash_remaining,
@@ -213,6 +282,7 @@ async def get_session(session_id: str) -> dict:
             "position_size": s.position_size,
             "max_entries": s.max_entries,
             "max_daily_loss": s.max_daily_loss,
+            "max_total_exposure": s.max_total_exposure,
             "error_message": s.error_message,
             "created_at": _iso_utc(s.created_at),
             "started_at": _iso_utc(s.started_at),
@@ -329,6 +399,7 @@ async def clone_session(session_id: str) -> dict:
             position_size=source.position_size,
             max_entries=source.max_entries,
             max_daily_loss=source.max_daily_loss,
+            max_total_exposure=source.max_total_exposure,
         )
 
         symbols_out = []
@@ -341,6 +412,7 @@ async def clone_session(session_id: str) -> dict:
                 allocated_capital=ss.allocated_capital,
                 position_size=ss.position_size,
                 max_entries=ss.max_entries,
+                max_daily_entries=ss.max_daily_entries,
             )
             symbols_out.append({
                 "id": new_sym.id,
@@ -358,6 +430,7 @@ async def clone_session(session_id: str) -> dict:
             "position_size": new_session.position_size,
             "max_entries": new_session.max_entries,
             "max_daily_loss": new_session.max_daily_loss,
+            "max_total_exposure": new_session.max_total_exposure,
             "created_at": _iso_utc(new_session.created_at),
         },
         "symbols": symbols_out,

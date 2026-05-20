@@ -256,13 +256,14 @@ class TickFetcher:
         provider = self._provider
         end_dt_str = window_end.strftime("%Y%m%d-%H:%M:%S")
 
-        # Route through the provider's own thread so ib_insync gets
+        # Route through the shared IB thread so ib_insync gets
         # a proper event loop and the connection is reused.
         def _do_fetch():
             from ib_insync import Stock
+            from app.providers.ibkr_shared import get_ib, ensure_connected
 
-            provider._ensure_connected()
-            ib = provider._get_ib()
+            ensure_connected()
+            ib = get_ib()
             contract = Stock(symbol.upper(), provider._exchange, provider._currency)
             bars = ib.reqHistoricalData(
                 contract,
@@ -278,7 +279,8 @@ class TickFetcher:
                 return []
             return [provider._to_candle(symbol, Timeframe.FIVE_SECONDS, bar) for bar in bars]
 
-        return provider._run_on_ib_thread(_do_fetch)
+        from app.providers.ibkr_shared import run_on_ib_thread
+        return run_on_ib_thread(_do_fetch)
 
     def _mock_window(self, symbol: str, window_start: datetime, window_end: datetime) -> list[Candle]:
         """Generate synthetic 5-second bars for mock/dev mode."""

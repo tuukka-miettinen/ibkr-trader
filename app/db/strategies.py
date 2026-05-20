@@ -1,6 +1,10 @@
 """Repository for strategy algorithms and backtest runs."""
 from __future__ import annotations
 
+import hashlib
+import io
+import tokenize
+
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,6 +12,33 @@ from app.db.models import BacktestRun, StrategyAlgorithm
 
 
 class StrategyRepository:
+    @staticmethod
+    def _normalize_script(script: str) -> str:
+        return script.replace("\r\n", "\n").replace("\r", "\n")
+
+    @classmethod
+    def _canonicalize_script(cls, script: str) -> str:
+        normalized = cls._normalize_script(script)
+        tokens: list[str] = []
+        ignored = {
+            tokenize.COMMENT,
+            tokenize.NL,
+            tokenize.NEWLINE,
+            tokenize.INDENT,
+            tokenize.DEDENT,
+            tokenize.ENDMARKER,
+        }
+        for tok in tokenize.generate_tokens(io.StringIO(normalized).readline):
+            if tok.type in ignored:
+                continue
+            tokens.append(f"{tok.type}:{tok.string}")
+        return "\x1f".join(tokens)
+
+    @classmethod
+    def _script_hash(cls, script: str) -> str:
+        canonical = cls._canonicalize_script(script)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
     async def save_algorithm(
         self,
         session: AsyncSession,
@@ -15,6 +46,41 @@ class StrategyRepository:
         script: str,
         description: str | None = None,
     ) -> StrategyAlgorithm:
+        normalized_script = self._normalize_script(script)
+        script_hash = self._script_hash(normalized_script)
+
+        # Reuse an existing version when the strategy source is unchanged.
+        existing_stmt = (
+            select(StrategyAlgorithm)
+            .where(StrategyAlgorithm.name == name)
+            .order_by(StrategyAlgorithm.version.desc())
+        )
+        existing_result = await session.execute(existing_stmt)
+        existing_algorithms = list(existing_result.scalars().all())
+
+        for existing in existing_algorithms:
+            existing_hash = existing.script_hash or self._script_hash(existing.script)
+            if existing_hash != script_hash:
+                # Backward-compatible fallback for rows hashed with an older scheme.
+                existing_hash = self._script_hash(existing.script)
+            if existing_hash != script_hash:
+                continue
+
+            updated = False
+            if existing.script_hash != script_hash:
+                existing.script_hash = script_hash
+                updated = True
+            if existing.script != normalized_script:
+                existing.script = normalized_script
+                updated = True
+            if description is not None and existing.description != description:
+                existing.description = description
+                updated = True
+            if updated:
+                await session.commit()
+                await session.refresh(existing)
+            return existing
+
         # Find the latest version for this name
         stmt = (
             select(func.max(StrategyAlgorithm.version))
@@ -27,7 +93,8 @@ class StrategyRepository:
         algo = StrategyAlgorithm(
             name=name,
             version=next_version,
-            script=script,
+            script=normalized_script,
+            script_hash=script_hash,
             description=description,
         )
         session.add(algo)
