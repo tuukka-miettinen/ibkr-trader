@@ -24,8 +24,13 @@ function fmtSigned$(v: number) {
 function fmtPct(v: number) {
   return `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
 }
+
+const POSITIVE_COLOR = "#15803d";
+const NEGATIVE_COLOR = "#b91c1c";
+const NEUTRAL_COLOR = "#5a5a5a";
+
 function pnlColor(v: number) {
-  return v > 0 ? "#10b981" : v < 0 ? "#ef4444" : "#94a3b8";
+  return v > 0 ? POSITIVE_COLOR : v < 0 ? NEGATIVE_COLOR : NEUTRAL_COLOR;
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -486,9 +491,9 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
       {showCreate && (
         <div
           style={{
-            background: "rgba(15, 23, 42, 0.95)",
-            border: "1px solid rgba(148, 163, 184, 0.2)",
-            borderRadius: "8px",
+            background: "#ffffff",
+            border: "1px solid #000000",
+            borderRadius: "0",
             padding: "1rem",
             marginBottom: "1rem",
           }}
@@ -546,7 +551,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
 
           {/* Symbols */}
           <div style={{ marginBottom: "0.75rem" }}>
-            <div style={{ fontSize: "0.8rem", color: "#94a3b8", marginBottom: "0.35rem" }}>Symbols</div>
+            <div style={{ fontSize: "0.8rem", color: "#5a5a5a", marginBottom: "0.35rem" }}>Symbols</div>
             {formSymbols.map((row, idx) => (
               <div key={idx} style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginBottom: "0.3rem", flexWrap: "wrap" }}>
                 <input
@@ -581,13 +586,13 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                   if (!r || r === "loading") return null;
                   if (r.ok) {
                     return (
-                      <span style={{ fontSize: "0.7rem", color: r.note ? "#f59e0b" : "#10b981" }}>
+                      <span style={{ fontSize: "0.7rem", color: r.note ? NEUTRAL_COLOR : POSITIVE_COLOR }}>
                         {r.note ? "⚠" : "✓"} {r.exchange}{r.last_price != null ? ` · $${r.last_price}` : ""}
                         {r.note ? ` — ${r.note}` : ""}
                       </span>
                     );
                   }
-                  return <span style={{ fontSize: "0.7rem", color: "#ef4444" }}>✗ {r.error}</span>;
+                  return <span style={{ fontSize: "0.7rem", color: NEGATIVE_COLOR }}>✗ {r.error}</span>;
                 })()}
                 {formSymbols.length > 1 && (
                   <button type="button" onClick={() => removeSymbolRow(idx)} style={{ fontSize: "0.7rem", padding: "0.1rem 0.3rem" }}>
@@ -611,7 +616,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
       {!activeSessionId && !showCreate && (
         <div>
           {sessions.length === 0 ? (
-            <p style={{ color: "#94a3b8" }}>No sessions yet. Click "+ New Session" to get started.</p>
+            <p style={{ color: "#5a5a5a" }}>No sessions yet. Click "+ New Session" to get started.</p>
           ) : (
             <div className="backtest-trades backtest-batch-results">
               <table>
@@ -635,10 +640,10 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                           style={{
                             color:
                               s.status === "running" || s.is_running
-                                ? "#10b981"
+                                ? POSITIVE_COLOR
                                 : s.status === "error"
-                                  ? "#ef4444"
-                                  : "#94a3b8",
+                                  ? NEGATIVE_COLOR
+                                  : NEUTRAL_COLOR,
                             fontWeight: 600,
                           }}
                         >
@@ -664,7 +669,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                               type="button"
                               onClick={() => doAction("kill", s.id)}
                               disabled={actionLoading}
-                              style={{ fontSize: "0.75rem", background: "#991b1b", color: "#fca5a5", border: "1px solid #ef4444" }}
+                              style={{ fontSize: "0.75rem", background: "#ffffff", color: NEGATIVE_COLOR, border: `1px solid ${NEGATIVE_COLOR}` }}
                             >
                               ⚠ Kill
                             </button>
@@ -693,26 +698,26 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
               justifyContent: "space-between",
               alignItems: "center",
               padding: "0.5rem 0.75rem",
-              background: sessionDetail.is_running ? "rgba(16, 185, 129, 0.1)" : "rgba(148, 163, 184, 0.08)",
-              borderRadius: "8px",
+              background: sessionDetail.is_running ? "#f3f3f3" : "#f3f3f3",
+              borderRadius: "0",
               marginBottom: "0.75rem",
-              border: `1px solid ${sessionDetail.is_running ? "rgba(16, 185, 129, 0.3)" : "rgba(148, 163, 184, 0.15)"}`,
+              border: `1px solid ${sessionDetail.is_running ? "#000000" : "#000000"}`,
             }}
           >
             <div style={{ display: "flex", gap: "1rem", alignItems: "center" }}>
               <span style={{ fontWeight: 700 }}>{sessionDetail.session.name}</span>
               <span
                 style={{
-                  color: sessionDetail.is_running ? "#10b981" : sessionDetail.session.status === "error" ? "#ef4444" : "#94a3b8",
+                  color: sessionDetail.is_running ? POSITIVE_COLOR : sessionDetail.session.status === "error" ? NEGATIVE_COLOR : NEUTRAL_COLOR,
                   fontWeight: 600,
                   fontSize: "0.85rem",
                 }}
               >
                 {sessionDetail.is_running ? "● RUNNING" : sessionDetail.session.status.toUpperCase()}
               </span>
-              {wsConnected && <span style={{ fontSize: "0.7rem", color: "#10b981" }}>WS ●</span>}
+              {wsConnected && <span style={{ fontSize: "0.7rem", color: POSITIVE_COLOR }}>WS ●</span>}
               {sessionDetail.session.started_at && (
-                <span style={{ fontSize: "0.75rem", color: "#64748b" }}>
+                <span style={{ fontSize: "0.75rem", color: "#707070" }}>
                   Started: {new Date(sessionDetail.session.started_at).toLocaleString()}
                 </span>
               )}
@@ -736,7 +741,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                       }
                     }}
                     disabled={actionLoading}
-                    style={{ background: "#991b1b", color: "#fca5a5", border: "1px solid #ef4444", fontWeight: 700 }}
+                    style={{ background: "#ffffff", color: NEGATIVE_COLOR, border: `1px solid ${NEGATIVE_COLOR}`, fontWeight: 700 }}
                   >
                     ⚠ KILL
                   </button>
@@ -805,7 +810,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                   return (
                     <tr key={s.id} style={{ cursor: "pointer" }} onClick={() => setExpandedSymbol(isExpanded ? null : s.symbol)}>
                       <td style={{ fontWeight: 700 }}>
-                        <span style={{ marginRight: "0.35rem", fontSize: "0.7rem", color: "#64748b" }}>{isExpanded ? "▼" : "▶"}</span>
+                        <span style={{ marginRight: "0.35rem", fontSize: "0.7rem", color: "#707070" }}>{isExpanded ? "▼" : "▶"}</span>
                         {s.symbol}
                         {s.delayed && (
                           <span
@@ -813,10 +818,10 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                               marginLeft: "0.4rem",
                               fontSize: "0.6rem",
                               fontWeight: 600,
-                              background: "#92400e",
-                              color: "#fbbf24",
+                              background: "#f3f3f3",
+                              color: "#000000",
                               padding: "0.05rem 0.25rem",
-                              borderRadius: "3px",
+                              borderRadius: "0",
                               verticalAlign: "middle",
                             }}
                           >
@@ -846,11 +851,11 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                         {fmt$(portfolioVal)}
                       </td>
                       <td style={{ textAlign: "center", fontWeight: 600, fontSize: "0.85rem" }}>
-                        <span style={{ color: "#10b981" }}>{buys}</span>
-                        <span style={{ color: "#64748b" }}>/</span>
-                        <span style={{ color: "#ef4444" }}>{sells}</span>
-                        <span style={{ color: "#64748b" }}>/</span>
-                        <span style={{ color: "#e2e8f0" }}>{symTrades.length}</span>
+                        <span style={{ color: POSITIVE_COLOR }}>{buys}</span>
+                        <span style={{ color: "#707070" }}>/</span>
+                        <span style={{ color: NEGATIVE_COLOR }}>{sells}</span>
+                        <span style={{ color: "#707070" }}>/</span>
+                        <span style={{ color: "#000000" }}>{symTrades.length}</span>
                       </td>
                     </tr>
                   );
@@ -863,9 +868,9 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
           {expandedSymbol && sessionDetail.symbols.some((s) => s.symbol === expandedSymbol) && (
             <div
               style={{
-                background: "rgba(15, 23, 42, 0.9)",
-                border: "1px solid rgba(148, 163, 184, 0.15)",
-                borderRadius: "8px",
+                background: "#ffffff",
+                border: "1px solid #000000",
+                borderRadius: "0",
                 padding: "0.75rem",
                 marginBottom: "0.75rem",
               }}
@@ -876,7 +881,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                   {(() => {
                     const s = sessionDetail.symbols.find((sym) => sym.symbol === expandedSymbol);
                     return s?.last_price != null ? (
-                      <span style={{ fontWeight: 600, marginLeft: "0.5rem", color: "#e2e8f0" }}>
+                      <span style={{ fontWeight: 600, marginLeft: "0.5rem", color: "#000000" }}>
                         {fmt$(s.last_price)}
                       </span>
                     ) : null;
@@ -904,7 +909,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
           <div className="backtest-trades backtest-batch-results">
             <h3 style={{ margin: "0 0 0.5rem", fontSize: "0.9rem" }}>Trade Log</h3>
             {trades.length === 0 ? (
-              <p style={{ color: "#94a3b8", fontSize: "0.85rem" }}>No trades yet.</p>
+              <p style={{ color: "#5a5a5a", fontSize: "0.85rem" }}>No trades yet.</p>
             ) : (
               <table>
                 <thead>
@@ -924,7 +929,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                     <tr key={t.id}>
                       <td>{t.created_at ? new Date(t.created_at).toLocaleString() : "—"}</td>
                       <td style={{ fontWeight: 600 }}>{t.symbol}</td>
-                      <td style={{ color: t.side === "buy" ? "#10b981" : "#ef4444", fontWeight: 600 }}>
+                      <td style={{ color: t.side === "buy" ? POSITIVE_COLOR : NEGATIVE_COLOR, fontWeight: 600 }}>
                         {t.side.toUpperCase()}
                       </td>
                       <td>{t.shares.toFixed(4)}</td>

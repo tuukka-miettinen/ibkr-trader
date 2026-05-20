@@ -9,6 +9,10 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 
+const POSITIVE_COLOR = "#15803d";
+const NEGATIVE_COLOR = "#b91c1c";
+const NEUTRAL_COLOR = "#555555";
+
 import type { LiveTrade } from "../lib/types";
 
 export type MiniCandle = {
@@ -88,16 +92,16 @@ function buildRsi(closes: number[], period = 14): (number | null)[] {
 
 const CHART_OPTS = {
   layout: {
-    background: { type: ColorType.Solid as const, color: "transparent" },
-    textColor: "#94a3b8",
+    background: { type: ColorType.Solid as const, color: "#ffffff" },
+    textColor: "#000000",
     fontSize: 10,
   },
   grid: {
-    vertLines: { color: "rgba(148,163,184,0.06)" },
-    horzLines: { color: "rgba(148,163,184,0.06)" },
+    vertLines: { color: "rgba(0,0,0,0.08)" },
+    horzLines: { color: "rgba(0,0,0,0.08)" },
   },
   crosshair: { mode: CrosshairMode.Normal },
-  rightPriceScale: { borderColor: "rgba(148,163,184,0.15)" },
+  rightPriceScale: { borderColor: "rgba(0,0,0,0.18)" },
 };
 
 export default function MiniSymbolChart({ candles, trades, symbol, sessionStartTime }: Props) {
@@ -125,25 +129,25 @@ export default function MiniSymbolChart({ candles, trades, symbol, sessionStartT
       timeScale: {
         timeVisible: true,
         secondsVisible: true,
-        borderColor: "rgba(148,163,184,0.15)",
+        borderColor: "rgba(0,0,0,0.18)",
       },
     });
     priceChartRef.current = priceChart;
 
     const candleSeries = priceChart.addCandlestickSeries({
-      upColor: "#10b981",
-      downColor: "#ef4444",
-      borderUpColor: "#10b981",
-      borderDownColor: "#ef4444",
-      wickUpColor: "#10b981",
-      wickDownColor: "#ef4444",
+      upColor: POSITIVE_COLOR,
+      downColor: NEGATIVE_COLOR,
+      borderUpColor: POSITIVE_COLOR,
+      borderDownColor: NEGATIVE_COLOR,
+      wickUpColor: POSITIVE_COLOR,
+      wickDownColor: NEGATIVE_COLOR,
       priceLineVisible: false,
       lastValueVisible: true,
     });
     candleSeriesRef.current = candleSeries;
 
     const vwapSeries = priceChart.addLineSeries({
-      color: "#f59e0b",
+      color: NEUTRAL_COLOR,
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,
       priceLineVisible: false,
@@ -160,13 +164,13 @@ export default function MiniSymbolChart({ candles, trades, symbol, sessionStartT
       timeScale: {
         timeVisible: true,
         secondsVisible: true,
-        borderColor: "rgba(148,163,184,0.15)",
+        borderColor: "rgba(0,0,0,0.18)",
       },
     });
     rsiChartRef.current = rsiChart;
 
     const rsiSeries = rsiChart.addLineSeries({
-      color: "#a78bfa",
+      color: NEUTRAL_COLOR,
       lineWidth: 1,
       priceLineVisible: false,
       lastValueVisible: false,
@@ -174,8 +178,8 @@ export default function MiniSymbolChart({ candles, trades, symbol, sessionStartT
     });
     rsiSeriesRef.current = rsiSeries;
 
-    rsiSeries.createPriceLine({ price: 70, color: "rgba(239,68,68,0.4)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "" });
-    rsiSeries.createPriceLine({ price: 30, color: "rgba(16,185,129,0.4)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "" });
+    rsiSeries.createPriceLine({ price: 70, color: "rgba(185,28,28,0.45)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "" });
+    rsiSeries.createPriceLine({ price: 30, color: "rgba(21,128,61,0.45)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "" });
     rsiChart.priceScale("right").applyOptions({ autoScale: false, scaleMargins: { top: 0.05, bottom: 0.05 } });
     rsiSeries.applyOptions({ autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 100 } }) });
 
@@ -299,7 +303,7 @@ export default function MiniSymbolChart({ candles, trades, symbol, sessionStartT
       markers.push({
         time: snapToNearest(t.created_at, candleTsSet),
         position: t.side === "buy" ? "belowBar" : "aboveBar",
-        color: t.side === "buy" ? "#10b981" : "#ef4444",
+        color: t.side === "buy" ? POSITIVE_COLOR : NEGATIVE_COLOR,
         shape: t.side === "buy" ? "arrowUp" : "arrowDown",
         text: `${t.side === "buy" ? "B" : "S"} $${t.price.toFixed(2)}`,
       });
@@ -310,7 +314,7 @@ export default function MiniSymbolChart({ candles, trades, symbol, sessionStartT
       markers.push({
         time: snapToNearest(sessionStartTime, candleTsSet),
         position: "aboveBar",
-        color: "#3b82f6",
+        color: NEUTRAL_COLOR,
         shape: "square",
         text: "▶ Session",
       });
@@ -321,13 +325,13 @@ export default function MiniSymbolChart({ candles, trades, symbol, sessionStartT
   }, [trades, candles.length, symbol, sessionStartTime]);
 
   if (candles.length === 0) {
-    return <p style={{ color: "#64748b", fontSize: "0.8rem", margin: "0.5rem 0" }}>Waiting for candle data…</p>;
+    return <p style={{ color: "#5a5a5a", fontSize: "0.8rem", margin: "0.5rem 0" }}>Waiting for candle data…</p>;
   }
 
   return (
     <div style={{ width: "100%" }}>
-      <div ref={priceRef} style={{ width: "100%", height: 180, borderRadius: "8px 8px 0 0", overflow: "hidden" }} />
-      <div ref={rsiRef} style={{ width: "100%", height: 70, borderRadius: "0 0 8px 8px", overflow: "hidden", borderTop: "1px solid rgba(148,163,184,0.1)" }} />
+      <div ref={priceRef} style={{ width: "100%", height: 180, overflow: "hidden", border: "1px solid #000000" }} />
+      <div ref={rsiRef} style={{ width: "100%", height: 70, overflow: "hidden", border: "1px solid #000000", borderTop: "0" }} />
     </div>
   );
 }

@@ -227,6 +227,52 @@ class LiveSessionSymbol(Base):
     )
 
 
+class LiveSessionSeedCandle(Base):
+    """Historical warm-up candle snapshot captured when a live session starts."""
+
+    __tablename__ = "live_session_seed_candle"
+
+    id = Column(String(36), primary_key=True, default=lambda: __import__("uuid").uuid4().hex)
+    session_symbol_id = Column(String(36), ForeignKey("live_session_symbol.id"), nullable=False, index=True)
+    timeframe = Column(
+        Enum(Timeframe, values_callable=lambda enum_cls: [member.value for member in enum_cls], native_enum=False),
+        nullable=False,
+    )
+    time = Column(DateTime(timezone=True), nullable=False)
+    open = Column(Float, nullable=False)
+    high = Column(Float, nullable=False)
+    low = Column(Float, nullable=False)
+    close = Column(Float, nullable=False)
+    volume = Column(BigInteger, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("session_symbol_id", "timeframe", "time", name="uq_live_session_seed_candle"),
+        Index("ix_live_session_seed_lookup", "session_symbol_id", "timeframe", "time"),
+    )
+
+
+class LiveSessionTick(Base):
+    """Captured 5-second bars seen by the live paper-trading session."""
+
+    __tablename__ = "live_session_tick"
+
+    id = Column(String(36), primary_key=True, default=lambda: __import__("uuid").uuid4().hex)
+    session_symbol_id = Column(String(36), ForeignKey("live_session_symbol.id"), nullable=False, index=True)
+    time = Column(DateTime(timezone=True), nullable=False)
+    open = Column(Float, nullable=False)
+    high = Column(Float, nullable=False)
+    low = Column(Float, nullable=False)
+    close = Column(Float, nullable=False)
+    volume = Column(BigInteger, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("session_symbol_id", "time", name="uq_live_session_tick"),
+        Index("ix_live_session_tick_lookup", "session_symbol_id", "time"),
+    )
+
+
 class LiveTrade(Base):
     """An executed trade within a live session."""
 
@@ -242,6 +288,7 @@ class LiveTrade(Base):
     cost = Column(Float, nullable=False)
     pnl = Column(Float, nullable=True)
     pnl_pct = Column(Float, nullable=True)
+    event_time = Column(DateTime(timezone=True), nullable=True)
     ibkr_order_id = Column(Integer, nullable=True)
     status = Column(
         Enum("pending", "filled", "cancelled", "error", name="trade_status"),

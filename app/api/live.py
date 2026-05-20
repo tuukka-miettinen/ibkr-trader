@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.db.database import get_db_context
 from app.db.live import LiveRepository
+from app.services.live_comparison import live_comparison_service
 from app.services.live_engine import live_engine
 
 router = APIRouter(prefix="/api/live", tags=["live"])
@@ -41,6 +42,11 @@ class CreateSessionRequest(BaseModel):
     max_entries: int = Field(default=5, ge=1, le=100)
     max_daily_loss: float = Field(default=500.0, gt=0)
     order_type: str = Field(default="market", pattern=r"^(market|limit)$")
+
+
+class CompareSessionRequest(BaseModel):
+    symbol: str
+    minutes: int = Field(default=30, ge=1, le=240)
 
 
 # ── REST endpoints ───────────────────────────────────────────────────
@@ -273,6 +279,7 @@ async def get_trades(session_id: str, symbol: str | None = None) -> dict:
                 "cost": t.cost,
                 "pnl": t.pnl,
                 "pnl_pct": t.pnl_pct,
+                "event_time": _iso_utc(t.event_time),
                 "ibkr_order_id": t.ibkr_order_id,
                 "status": t.status,
                 "created_at": _iso_utc(t.created_at),
@@ -280,6 +287,30 @@ async def get_trades(session_id: str, symbol: str | None = None) -> dict:
             for t in trades
         ]
     }
+
+
+@router.post("/sessions/{session_id}/compare")
+async def compare_session(session_id: str, body: CompareSessionRequest) -> dict:
+    """Replay captured paper-session ticks and compare them to live trades."""
+    symbol = body.symbol.strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=422, detail="symbol is required")
+
+    if live_engine.is_session_running(session_id):
+        await live_engine.flush_capture(session_id, symbol=symbol)
+
+    async with get_db_context() as db:
+        try:
+            return await live_comparison_service.compare_session_symbol(
+                db,
+                session_id=session_id,
+                symbol=symbol,
+                minutes=body.minutes,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            status_code = 404 if "not found" in message else 409
+            raise HTTPException(status_code=status_code, detail=message) from exc
 
 
 @router.post("/sessions/{session_id}/clone")

@@ -10,13 +10,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import (
     LivePositionEntry,
     LiveSession,
+    LiveSessionSeedCandle,
     LiveSessionSymbol,
+    LiveSessionTick,
     LiveTrade,
 )
+from app.models.market_data import Candle, Timeframe
 
 
 def _uuid() -> str:
     return uuid.uuid4().hex
+
+
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 class LiveRepository:
@@ -130,6 +141,19 @@ class LiveRepository:
         result = await session.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_session_symbol(
+        self,
+        session: AsyncSession,
+        session_id: str,
+        symbol: str,
+    ) -> LiveSessionSymbol | None:
+        stmt = select(LiveSessionSymbol).where(
+            LiveSessionSymbol.session_id == session_id,
+            LiveSessionSymbol.symbol == symbol.upper(),
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def update_symbol_state(
         self,
         session: AsyncSession,
@@ -191,6 +215,7 @@ class LiveRepository:
         cost: float,
         pnl: float | None = None,
         pnl_pct: float | None = None,
+        event_time: datetime | None = None,
         ibkr_order_id: int | None = None,
         status: str = "filled",
     ) -> LiveTrade:
@@ -205,6 +230,7 @@ class LiveRepository:
             cost=cost,
             pnl=pnl,
             pnl_pct=pnl_pct,
+            event_time=event_time,
             ibkr_order_id=ibkr_order_id,
             status=status,
         )
@@ -214,14 +240,138 @@ class LiveRepository:
         return trade
 
     async def get_trades(
-        self, session: AsyncSession, session_id: str, symbol: str | None = None
+        self,
+        session: AsyncSession,
+        session_id: str,
+        symbol: str | None = None,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        ascending: bool = False,
     ) -> list[LiveTrade]:
         stmt = select(LiveTrade).where(LiveTrade.session_id == session_id)
         if symbol:
             stmt = stmt.where(LiveTrade.symbol == symbol.upper())
-        stmt = stmt.order_by(LiveTrade.created_at.desc())
+        if start_time is not None:
+            stmt = stmt.where(LiveTrade.event_time.is_not(None), LiveTrade.event_time >= start_time)
+        if end_time is not None:
+            stmt = stmt.where(LiveTrade.event_time.is_not(None), LiveTrade.event_time <= end_time)
+        if ascending:
+            stmt = stmt.order_by(LiveTrade.event_time.asc(), LiveTrade.created_at.asc())
+        else:
+            stmt = stmt.order_by(LiveTrade.event_time.desc(), LiveTrade.created_at.desc())
         result = await session.execute(stmt)
         return list(result.scalars().all())
+
+    async def replace_seed_candles(
+        self,
+        session: AsyncSession,
+        *,
+        session_symbol_id: str,
+        timeframe: Timeframe,
+        candles: list[Candle],
+    ) -> None:
+        await session.execute(
+            delete(LiveSessionSeedCandle).where(
+                LiveSessionSeedCandle.session_symbol_id == session_symbol_id,
+                LiveSessionSeedCandle.timeframe == timeframe,
+            )
+        )
+        session.add_all([
+            LiveSessionSeedCandle(
+                id=_uuid(),
+                session_symbol_id=session_symbol_id,
+                timeframe=timeframe,
+                time=candle.time,
+                open=candle.open,
+                high=candle.high,
+                low=candle.low,
+                close=candle.close,
+                volume=candle.volume,
+            )
+            for candle in candles
+        ])
+        await session.commit()
+
+    async def get_seed_candles(
+        self,
+        session: AsyncSession,
+        session_symbol_id: str,
+    ) -> dict[Timeframe, list[Candle]]:
+        stmt = (
+            select(LiveSessionSeedCandle)
+            .where(LiveSessionSeedCandle.session_symbol_id == session_symbol_id)
+            .order_by(LiveSessionSeedCandle.timeframe, LiveSessionSeedCandle.time)
+        )
+        result = await session.execute(stmt)
+        candles_by_tf: dict[Timeframe, list[Candle]] = {}
+        for row in result.scalars().all():
+            candles_by_tf.setdefault(row.timeframe, []).append(Candle(
+                symbol="",
+                timeframe=row.timeframe,
+                time=_ensure_utc(row.time),
+                open=row.open,
+                high=row.high,
+                low=row.low,
+                close=row.close,
+                volume=row.volume,
+            ))
+        return candles_by_tf
+
+    async def record_ticks(
+        self,
+        session: AsyncSession,
+        *,
+        session_symbol_id: str,
+        ticks: list[Candle],
+    ) -> None:
+        if not ticks:
+            return
+        session.add_all([
+            LiveSessionTick(
+                id=_uuid(),
+                session_symbol_id=session_symbol_id,
+                time=tick.time,
+                open=tick.open,
+                high=tick.high,
+                low=tick.low,
+                close=tick.close,
+                volume=tick.volume,
+            )
+            for tick in ticks
+        ])
+        await session.commit()
+
+    async def get_ticks(
+        self,
+        session: AsyncSession,
+        session_symbol_id: str,
+        *,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+    ) -> list[Candle]:
+        stmt = (
+            select(LiveSessionTick)
+            .where(LiveSessionTick.session_symbol_id == session_symbol_id)
+            .order_by(LiveSessionTick.time)
+        )
+        if start_time is not None:
+            stmt = stmt.where(LiveSessionTick.time >= start_time)
+        if end_time is not None:
+            stmt = stmt.where(LiveSessionTick.time <= end_time)
+        result = await session.execute(stmt)
+        return [
+            Candle(
+                symbol="",
+                timeframe=Timeframe.FIVE_SECONDS,
+                time=_ensure_utc(row.time),
+                open=row.open,
+                high=row.high,
+                low=row.low,
+                close=row.close,
+                volume=row.volume,
+            )
+            for row in result.scalars().all()
+        ]
 
     # ── Position entries ──────────────────────────────────────────────
 

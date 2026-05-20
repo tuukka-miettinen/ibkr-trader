@@ -47,6 +47,7 @@ class SymbolRuntime:
     tick_count: int = 0
     last_tick_time: datetime | None = None
     delayed: bool = False
+    captured_ticks: list[Candle] = field(default_factory=list)
 
 
 class LiveTradingEngine:
@@ -186,6 +187,13 @@ class LiveTradingEngine:
                     historical = self._client.get_historical_candles(sym, tf, "1 D")
                     if historical:
                         runtime.aggregator.seed_candles(tf, historical)
+                        async with get_db_context() as db:
+                            await self._repo.replace_seed_candles(
+                                db,
+                                session_symbol_id=runtime.session_symbol_id,
+                                timeframe=tf,
+                                candles=historical,
+                            )
                         logger.info(
                             "Seeded %d %s candles for %s", len(historical), tf, sym,
                         )
@@ -230,6 +238,7 @@ class LiveTradingEngine:
                 logger.exception("Error unsubscribing %s", sym)
 
         # Persist final state
+        await self._flush_captured_ticks(session_id)
         await self._persist_all_symbols(session_id)
 
         # Update DB status
@@ -301,6 +310,17 @@ class LiveTradingEngine:
     def is_session_running(self, session_id: str) -> bool:
         return session_id in self._sessions
 
+    async def flush_capture(self, session_id: str, symbol: str | None = None) -> None:
+        """Persist any buffered captured ticks for a session before comparison."""
+        state = self._sessions.get(session_id)
+        if state is None:
+            return
+
+        for sym, rt in state["symbols"].items():
+            if symbol is not None and sym != symbol.upper():
+                continue
+            await self._flush_runtime_ticks(rt)
+
     # ── WebSocket subscription ────────────────────────────────────────
 
     def subscribe_ws(self, session_id: str) -> asyncio.Queue:
@@ -319,6 +339,25 @@ class LiveTradingEngine:
                 q.put_nowait(event)
             except asyncio.QueueFull:
                 pass  # drop events if consumer is slow
+
+    async def _flush_runtime_ticks(self, runtime: SymbolRuntime) -> None:
+        if not runtime.captured_ticks:
+            return
+        ticks = runtime.captured_ticks
+        runtime.captured_ticks = []
+        async with get_db_context() as db:
+            await self._repo.record_ticks(
+                db,
+                session_symbol_id=runtime.session_symbol_id,
+                ticks=ticks,
+            )
+
+    async def _flush_captured_ticks(self, session_id: str) -> None:
+        state = self._sessions.get(session_id)
+        if state is None:
+            return
+        for runtime in state["symbols"].values():
+            await self._flush_runtime_ticks(runtime)
 
     # ── Tick processing (called from IB thread) ───────────────────────
 
@@ -342,6 +381,7 @@ class LiveTradingEngine:
         rt.last_price = candle.close
         rt.tick_count += 1
         rt.last_tick_time = candle.time
+        rt.captured_ticks.append(candle)
 
         if rt.tick_count == 1:
             logger.info(
@@ -440,6 +480,7 @@ class LiveTradingEngine:
 
         # Persist every 60 ticks (≈ 5 minutes) to avoid excessive DB writes
         if rt.tick_count % 60 == 0:
+            await self._flush_runtime_ticks(rt)
             await self._persist_symbol(session_id, symbol)
 
     async def _execute_signal(
@@ -516,6 +557,7 @@ class LiveTradingEngine:
                     shares=round(shares, 8),
                     price=round(candle.close, 4),
                     cost=round(cost, 4),
+                    event_time=candle.time,
                     ibkr_order_id=ibkr_order_id,
                 )
                 await self._repo.add_position_entry(
@@ -596,6 +638,7 @@ class LiveTradingEngine:
                     cost=round(proceeds, 4),
                     pnl=round(dollar_pnl, 4),
                     pnl_pct=round(pnl_pct, 4),
+                    event_time=candle.time,
                     ibkr_order_id=ibkr_order_id,
                 )
                 await self._repo.clear_position_entries(db, rt.session_symbol_id)

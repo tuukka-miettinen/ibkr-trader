@@ -199,6 +199,8 @@ def run_tick_backtest(
     on_tick_fn: callable,
     config: TickBacktestConfig | None = None,
     on_progress: callable | None = None,
+    seed_candles: dict[Timeframe, list[Candle]] | None = None,
+    on_execution: callable | None = None,
 ) -> BacktestResult:
     """Run a tick-level backtest.
 
@@ -213,6 +215,8 @@ def run_tick_backtest(
 
     symbol = ticks[0].symbol
     aggregator = CandleAggregator(symbol, resolved.candle_timeframes)
+    for tf, candles in (seed_candles or {}).items():
+        aggregator.seed_candles(tf, candles)
 
     trades: list[Trade] = []
     daily_snapshots: list[DailySnapshot] = []
@@ -338,6 +342,14 @@ def run_tick_backtest(
                     "shares": round(shares, 8),
                     "cost": round(cost, 4),
                 })
+                if on_execution:
+                    on_execution({
+                        "side": "buy",
+                        "time": tick.time.isoformat(),
+                        "shares": round(shares, 8),
+                        "price": round(tick.close, 4),
+                        "cost": round(cost, 4),
+                    })
                 day_buys += 1
         elif signal == "sell" and position_shares > 0:
             proceeds = position_shares * tick.close
@@ -361,6 +373,16 @@ def run_tick_backtest(
             )
             trades.append(trade)
             day_realized_trades.append(trade)
+            if on_execution:
+                on_execution({
+                    "side": "sell",
+                    "time": tick.time.isoformat(),
+                    "shares": round(position_shares, 8),
+                    "price": round(tick.close, 4),
+                    "cost": round(proceeds, 4),
+                    "pnl": round(dollar_pnl, 4),
+                    "pnl_pct": round(pnl_pct, 4),
+                })
             cash += proceeds
             position_entries = []
             position_shares = 0.0

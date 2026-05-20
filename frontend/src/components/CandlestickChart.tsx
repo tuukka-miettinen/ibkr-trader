@@ -3,6 +3,10 @@ import { ColorType, CrosshairMode, LineStyle, createChart, type IChartApi, type 
 
 import type { Candle, Timeframe, TimelineEvent } from "../lib/types";
 
+const POSITIVE_COLOR = "#15803d";
+const NEGATIVE_COLOR = "#b91c1c";
+const NEUTRAL_COLOR = "#555555";
+
 type Props = {
   candles: Candle[];
   events: TimelineEvent[];
@@ -119,7 +123,7 @@ function buildMomentumMacd(candles: Candle[]) {
       histogram.push({
         time,
         value: histogramValue,
-        color: histogramValue >= 0 ? "rgba(16, 185, 129, 0.7)" : "rgba(239, 68, 68, 0.72)",
+        color: histogramValue >= 0 ? "rgba(21, 128, 61, 0.78)" : "rgba(185, 28, 28, 0.78)",
       });
     }
   });
@@ -196,21 +200,21 @@ export default function CandlestickChart({ candles, events, timeframe }: Props) 
     const chart = createChart(priceContainerRef.current, {
       autoSize: true,
       layout: {
-        background: { type: ColorType.Solid, color: "#07111f" },
-        textColor: "#dbe7f5",
+        background: { type: ColorType.Solid, color: "#ffffff" },
+        textColor: "#000000",
       },
       grid: {
-        vertLines: { color: "rgba(148, 163, 184, 0.12)" },
-        horzLines: { color: "rgba(148, 163, 184, 0.12)" },
+        vertLines: { color: "rgba(0, 0, 0, 0.12)" },
+        horzLines: { color: "rgba(0, 0, 0, 0.12)" },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
       },
       rightPriceScale: {
-        borderColor: "rgba(148, 163, 184, 0.25)",
+        borderColor: "rgba(0, 0, 0, 0.32)",
       },
       timeScale: {
-        borderColor: "rgba(148, 163, 184, 0.25)",
+        borderColor: "rgba(0, 0, 0, 0.32)",
         timeVisible: true,
       },
     });
@@ -218,22 +222,22 @@ export default function CandlestickChart({ candles, events, timeframe }: Props) 
     const macdChart = createChart(macdContainerRef.current, {
       autoSize: true,
       layout: {
-        background: { type: ColorType.Solid, color: "#07111f" },
-        textColor: "#9fb0c8",
+        background: { type: ColorType.Solid, color: "#ffffff" },
+        textColor: "#000000",
       },
       grid: {
-        vertLines: { color: "rgba(148, 163, 184, 0.08)" },
-        horzLines: { color: "rgba(148, 163, 184, 0.12)" },
+        vertLines: { color: "rgba(0, 0, 0, 0.08)" },
+        horzLines: { color: "rgba(0, 0, 0, 0.12)" },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
       },
       rightPriceScale: {
-        borderColor: "rgba(148, 163, 184, 0.2)",
+        borderColor: "rgba(0, 0, 0, 0.24)",
         scaleMargins: { top: 0.14, bottom: 0.14 },
       },
       timeScale: {
-        borderColor: "rgba(148, 163, 184, 0.25)",
+        borderColor: "rgba(0, 0, 0, 0.32)",
         timeVisible: true,
         visible: false,
       },
@@ -244,22 +248,22 @@ export default function CandlestickChart({ candles, events, timeframe }: Props) 
     const rsiChart = createChart(rsiContainerRef.current, {
       autoSize: true,
       layout: {
-        background: { type: ColorType.Solid, color: "#07111f" },
-        textColor: "#9fb0c8",
+        background: { type: ColorType.Solid, color: "#ffffff" },
+        textColor: "#000000",
       },
       grid: {
-        vertLines: { color: "rgba(148, 163, 184, 0.08)" },
-        horzLines: { color: "rgba(148, 163, 184, 0.12)" },
+        vertLines: { color: "rgba(0, 0, 0, 0.08)" },
+        horzLines: { color: "rgba(0, 0, 0, 0.12)" },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
       },
       rightPriceScale: {
-        borderColor: "rgba(148, 163, 184, 0.2)",
+        borderColor: "rgba(0, 0, 0, 0.24)",
         scaleMargins: { top: 0.12, bottom: 0.12 },
       },
       timeScale: {
-        borderColor: "rgba(148, 163, 184, 0.25)",
+        borderColor: "rgba(0, 0, 0, 0.32)",
         timeVisible: true,
         visible: false,
       },
@@ -268,14 +272,15 @@ export default function CandlestickChart({ candles, events, timeframe }: Props) 
     });
 
     const series = chart.addCandlestickSeries({
-      upColor: "#10b981",
-      downColor: "#ef4444",
-      borderVisible: false,
-      wickUpColor: "#10b981",
-      wickDownColor: "#ef4444",
+      upColor: POSITIVE_COLOR,
+      downColor: NEGATIVE_COLOR,
+      borderUpColor: POSITIVE_COLOR,
+      borderDownColor: NEGATIVE_COLOR,
+      wickUpColor: POSITIVE_COLOR,
+      wickDownColor: NEGATIVE_COLOR,
     });
     const vwapSeries = chart.addLineSeries({
-      color: "#f59e0b",
+      color: NEUTRAL_COLOR,
       lineWidth: 2,
       priceLineVisible: false,
       lastValueVisible: true,
@@ -287,25 +292,25 @@ export default function CandlestickChart({ candles, events, timeframe }: Props) 
       base: 0,
     });
     const macdSeries = macdChart.addLineSeries({
-      color: "#38bdf8",
+      color: POSITIVE_COLOR,
       lineWidth: 2,
       priceLineVisible: false,
       title: "MACD 3-10",
     });
     const signalSeries = macdChart.addLineSeries({
-      color: "#f59e0b",
+      color: NEGATIVE_COLOR,
       lineWidth: 2,
       priceLineVisible: false,
       title: "Signal 16",
     });
     const rsiSeries = rsiChart.addLineSeries({
-      color: "#a78bfa",
+      color: NEUTRAL_COLOR,
       lineWidth: 2,
       priceLineVisible: false,
       title: "RSI 14",
     });
     const rsiUpperBand = rsiChart.addLineSeries({
-      color: "rgba(239, 68, 68, 0.78)",
+      color: "rgba(185, 28, 28, 0.75)",
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,
       priceLineVisible: false,
@@ -313,7 +318,7 @@ export default function CandlestickChart({ candles, events, timeframe }: Props) 
       title: "70",
     });
     const rsiLowerBand = rsiChart.addLineSeries({
-      color: "rgba(16, 185, 129, 0.78)",
+      color: "rgba(21, 128, 61, 0.75)",
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,
       priceLineVisible: false,
@@ -399,7 +404,7 @@ export default function CandlestickChart({ candles, events, timeframe }: Props) 
         events.map((event) => ({
           time: toTimestamp(event.time),
           position: "aboveBar",
-          color: event.event_type === "earnings" ? "#f59e0b" : "#38bdf8",
+          color: event.event_type === "earnings" ? NEGATIVE_COLOR : POSITIVE_COLOR,
           shape: event.event_type === "earnings" ? "square" : "circle",
           text: event.title,
         })),

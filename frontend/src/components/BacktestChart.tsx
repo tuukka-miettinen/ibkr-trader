@@ -8,6 +8,10 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 
+const POSITIVE_COLOR = "#15803d";
+const NEGATIVE_COLOR = "#b91c1c";
+const NEUTRAL_COLOR = "#555555";
+
 export type PricePoint = { t: string; o: number; h: number; l: number; c: number; v: number };
 export type TradeEntry = { time: string; price: number; shares: number; cost: number };
 export type TradeData = {
@@ -90,21 +94,21 @@ export default function BacktestChart({ priceData, trades, selectedDate, openEnt
     const chartOpts = {
       width,
       layout: {
-        background: { type: ColorType.Solid as const, color: "transparent" },
-        textColor: "#94a3b8",
+        background: { type: ColorType.Solid as const, color: "#ffffff" },
+        textColor: "#000000",
         fontSize: 11,
       },
       grid: {
-        vertLines: { color: "rgba(148,163,184,0.06)" },
-        horzLines: { color: "rgba(148,163,184,0.06)" },
+        vertLines: { color: "rgba(0,0,0,0.08)" },
+        horzLines: { color: "rgba(0,0,0,0.08)" },
       },
       crosshair: { mode: CrosshairMode.Normal },
       timeScale: {
         timeVisible: true,
         secondsVisible: false,
-        borderColor: "rgba(148,163,184,0.15)",
+        borderColor: "rgba(0,0,0,0.18)",
       },
-      rightPriceScale: { borderColor: "rgba(148,163,184,0.15)" },
+      rightPriceScale: { borderColor: "rgba(0,0,0,0.18)" },
     };
 
     // ── Price chart ──────────────────────────────────────────────────
@@ -116,12 +120,12 @@ export default function BacktestChart({ priceData, trades, selectedDate, openEnt
 
     // Candlestick series
     const candleSeries = priceChart.addCandlestickSeries({
-      upColor: "#10b981",
-      downColor: "#ef4444",
-      borderUpColor: "#10b981",
-      borderDownColor: "#ef4444",
-      wickUpColor: "#10b981",
-      wickDownColor: "#ef4444",
+      upColor: POSITIVE_COLOR,
+      downColor: NEGATIVE_COLOR,
+      borderUpColor: POSITIVE_COLOR,
+      borderDownColor: NEGATIVE_COLOR,
+      wickUpColor: POSITIVE_COLOR,
+      wickDownColor: NEGATIVE_COLOR,
       priceLineVisible: false,
       lastValueVisible: false,
     });
@@ -137,7 +141,7 @@ export default function BacktestChart({ priceData, trades, selectedDate, openEnt
 
     // VWAP overlay
     const vwapSeries = priceChart.addLineSeries({
-      color: "#f59e0b",
+      color: NEUTRAL_COLOR,
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,
       priceLineVisible: false,
@@ -174,7 +178,7 @@ export default function BacktestChart({ priceData, trades, selectedDate, openEnt
           markers.push({
             time: nearestCandleTs(entry.time),
             position: "belowBar",
-            color: "#10b981",
+            color: POSITIVE_COLOR,
             shape: "arrowUp",
             text: `B $${entry.price.toFixed(2)}`,
           });
@@ -184,7 +188,7 @@ export default function BacktestChart({ priceData, trades, selectedDate, openEnt
         markers.push({
           time: nearestCandleTs(trade.exit_time),
           position: "aboveBar",
-          color: "#ef4444",
+          color: NEGATIVE_COLOR,
           shape: "arrowDown",
           text: `S $${trade.exit_price.toFixed(2)}`,
         });
@@ -196,7 +200,7 @@ export default function BacktestChart({ priceData, trades, selectedDate, openEnt
         markers.push({
           time: nearestCandleTs(entry.time),
           position: "belowBar",
-          color: "#10b981",
+          color: POSITIVE_COLOR,
           shape: "arrowUp",
           text: `B $${entry.price.toFixed(2)}`,
         });
@@ -214,7 +218,7 @@ export default function BacktestChart({ priceData, trades, selectedDate, openEnt
     const rsiValues = buildRsi(closes, 14);
 
     const rsiSeries = rsiChart.addLineSeries({
-      color: "#a78bfa",
+      color: NEUTRAL_COLOR,
       lineWidth: 1,
       priceLineVisible: false,
       lastValueVisible: false,
@@ -226,8 +230,8 @@ export default function BacktestChart({ priceData, trades, selectedDate, openEnt
     rsiSeries.setData(rsiData);
 
     // RSI reference lines at 30 and 70
-    rsiSeries.createPriceLine({ price: 70, color: "rgba(239,68,68,0.4)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "" });
-    rsiSeries.createPriceLine({ price: 30, color: "rgba(16,185,129,0.4)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "" });
+    rsiSeries.createPriceLine({ price: 70, color: "rgba(185,28,28,0.45)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "" });
+    rsiSeries.createPriceLine({ price: 30, color: "rgba(21,128,61,0.45)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "" });
 
     // Fix RSI scale to 0-100
     rsiChart.priceScale("right").applyOptions({ autoScale: false, scaleMargins: { top: 0.05, bottom: 0.05 } });
@@ -306,11 +310,11 @@ export default function BacktestChart({ priceData, trades, selectedDate, openEnt
     <div style={{ width: "100%" }}>
       <div
         ref={priceContainerRef}
-        style={{ width: "100%", height: 260, borderRadius: "8px 8px 0 0", overflow: "hidden" }}
+        style={{ width: "100%", height: 260, overflow: "hidden", border: "1px solid #000000" }}
       />
       <div
         ref={rsiContainerRef}
-        style={{ width: "100%", height: 100, borderRadius: "0 0 8px 8px", overflow: "hidden", borderTop: "1px solid rgba(148,163,184,0.1)" }}
+        style={{ width: "100%", height: 100, overflow: "hidden", border: "1px solid #000000", borderTop: "0" }}
       />
     </div>
   );

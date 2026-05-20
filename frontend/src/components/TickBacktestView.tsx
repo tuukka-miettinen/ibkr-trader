@@ -74,6 +74,15 @@ function formatSignedCurrency(v: number) {
 function formatSigned(v: number, suffix = "") {
   return `${v >= 0 ? "+" : ""}${v.toFixed(2)}${suffix}`;
 }
+
+const POSITIVE_COLOR = "#15803d";
+const NEGATIVE_COLOR = "#b91c1c";
+const NEUTRAL_COLOR = "#5a5a5a";
+
+function pnlColor(v: number) {
+  return v > 0 ? POSITIVE_COLOR : v < 0 ? NEGATIVE_COLOR : NEUTRAL_COLOR;
+}
+
 function dateInputValue(input: Date) {
   const year = input.getFullYear();
   const month = String(input.getMonth() + 1).padStart(2, "0");
@@ -353,8 +362,8 @@ export default function TickBacktestView() {
             Extended hours
           </label>
           {dataStatus && dataStatus.dates.length > 0 && (
-            <div style={{ fontSize: "0.75rem", color: "#94a3b8", display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
-              <span style={{ color: "#64748b" }}>Cached:</span>
+            <div style={{ fontSize: "0.75rem", color: "#5a5a5a", display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ color: "#707070" }}>Cached:</span>
               {dataStatus.dates.map((d) => {
                 const expected = extended ? 16 : 7;
                 return (
@@ -366,9 +375,9 @@ export default function TickBacktestView() {
             </div>
           )}
           {!dataStatus?.dates?.length && symbol.trim() && (
-            <span style={{ fontSize: "0.75rem", color: "#64748b" }}>No cached data</span>
+            <span style={{ fontSize: "0.75rem", color: "#707070" }}>No cached data</span>
           )}
-          <span style={{ fontSize: "0.75rem", color: "#64748b" }}>
+          <span style={{ fontSize: "0.75rem", color: "#707070" }}>
             Range uses full trading days from the start of the selected day through the end day.
           </span>
         </div>
@@ -390,9 +399,9 @@ export default function TickBacktestView() {
           </div>
           {showStrategyPicker && (
             <div className="strategy-picker" style={{
-              background: "rgba(15, 23, 42, 0.95)",
-              border: "1px solid rgba(148, 163, 184, 0.2)",
-              borderRadius: "8px",
+              background: "#ffffff",
+              border: "1px solid #000000",
+              borderRadius: "0",
               padding: "0.75rem",
               marginBottom: "0.5rem",
               maxHeight: "300px",
@@ -404,41 +413,41 @@ export default function TickBacktestView() {
               </div>
               {favorites.length > 0 && (
                 <>
-                  <div style={{ fontSize: "0.7rem", color: "#f59e0b", marginBottom: "0.25rem", fontWeight: 600 }}>★ Favorites</div>
+                  <div style={{ fontSize: "0.7rem", color: "#000000", marginBottom: "0.25rem", fontWeight: 600 }}>★ Favorites</div>
                   {favorites.map((a) => (
                     <div key={a.id} className="strategy-picker-item" style={{
                       display: "flex", alignItems: "center", gap: "0.5rem",
-                      padding: "0.3rem 0.5rem", borderRadius: "4px", cursor: "pointer",
+                      padding: "0.3rem 0.5rem", borderRadius: "0", cursor: "pointer",
                       fontSize: "0.8rem", marginBottom: "0.15rem",
                     }}>
                       <button type="button" onClick={() => toggleFavorite(a.id)}
-                        style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: "0.85rem", color: "#f59e0b" }}
+                        style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: "0.85rem", color: "#000000" }}
                         title="Remove from favorites">★</button>
                       <span style={{ flex: 1, cursor: "pointer" }} onClick={() => { loadAlgorithmScript(a.id); setShowStrategyPicker(false); }}>
-                        {a.name} <span style={{ color: "#64748b" }}>v{a.version}</span>
+                        {a.name} <span style={{ color: "#707070" }}>v{a.version}</span>
                       </span>
                     </div>
                   ))}
-                  <hr style={{ border: "none", borderTop: "1px solid rgba(148,163,184,0.15)", margin: "0.5rem 0" }} />
+                  <hr style={{ border: "none", borderTop: "1px solid #000000", margin: "0.5rem 0" }} />
                 </>
               )}
-              <div style={{ fontSize: "0.7rem", color: "#94a3b8", marginBottom: "0.25rem" }}>All Strategies</div>
+              <div style={{ fontSize: "0.7rem", color: "#5a5a5a", marginBottom: "0.25rem" }}>All Strategies</div>
               {algorithms.length === 0 && (
-                <div style={{ fontSize: "0.75rem", color: "#64748b" }}>No strategies saved yet.</div>
+                <div style={{ fontSize: "0.75rem", color: "#707070" }}>No strategies saved yet.</div>
               )}
               {algorithms.map((a) => (
                 <div key={a.id} className="strategy-picker-item" style={{
                   display: "flex", alignItems: "center", gap: "0.5rem",
-                  padding: "0.3rem 0.5rem", borderRadius: "4px", cursor: "pointer",
+                  padding: "0.3rem 0.5rem", borderRadius: "0", cursor: "pointer",
                   fontSize: "0.8rem", marginBottom: "0.15rem",
                 }}>
                   <button type="button" onClick={() => toggleFavorite(a.id)}
-                    style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: "0.85rem", color: a.is_favorite ? "#f59e0b" : "#475569" }}
+                    style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: "0.85rem", color: a.is_favorite ? "#000000" : "#8a8a8a" }}
                     title={a.is_favorite ? "Remove from favorites" : "Add to favorites"}>
                     {a.is_favorite ? "★" : "☆"}
                   </button>
                   <span style={{ flex: 1, cursor: "pointer" }} onClick={() => { loadAlgorithmScript(a.id); setShowStrategyPicker(false); }}>
-                    {a.name} <span style={{ color: "#64748b" }}>v{a.version}</span>
+                    {a.name} <span style={{ color: "#707070" }}>v{a.version}</span>
                   </span>
                 </div>
               ))}
@@ -449,7 +458,7 @@ export default function TickBacktestView() {
             defaultLanguage="python"
             value={script}
             onChange={(v) => setScript(v ?? "")}
-            theme="vs-dark"
+            theme="vs"
             options={{ minimap: { enabled: false }, fontSize: 13, scrollBeyondLastLine: false }}
           />
         </div>
@@ -517,13 +526,13 @@ export default function TickBacktestView() {
               <div><span>Win Rate</span><strong>{summary.win_rate}%</strong></div>
               <div>
                 <span>Total P&L</span>
-                <strong style={{ color: summary.total_pnl >= 0 ? "#10b981" : "#ef4444" }}>
+                <strong style={{ color: pnlColor(summary.total_pnl) }}>
                   {formatSignedCurrency(summary.total_pnl)} ({formatSigned(summary.total_pnl_pct, "%")})
                 </strong>
               </div>
               <div><span>Final Balance</span><strong>{formatCurrency(summary.final_balance)}</strong></div>
               {summary.total_fees > 0 && (
-                <div><span>Total Fees</span><strong style={{ color: "#f59e0b" }}>{formatCurrency(summary.total_fees)}</strong></div>
+                <div><span>Total Fees</span><strong style={{ color: "#000000" }}>{formatCurrency(summary.total_fees)}</strong></div>
               )}
             </div>
           )}
@@ -562,27 +571,27 @@ export default function TickBacktestView() {
                       <tr key={day.date} onClick={() => setChartDay(day.date)}
                         style={{
                           cursor: "pointer",
-                          background: isSelected ? "rgba(56, 189, 248, 0.1)" : undefined,
-                          borderLeft: isSelected ? "2px solid #38bdf8" : "2px solid transparent",
+                          background: isSelected ? "rgba(0, 0, 0, 0.08)" : undefined,
+                          borderLeft: isSelected ? "2px solid #000000" : "2px solid transparent",
                         }}>
                         <td>
                           {day.date}
-                          {isPartial && <span style={{ color: "#f59e0b", fontSize: "0.7rem", marginLeft: "0.35rem" }} title={`${dayTicks.toLocaleString()} ticks (partial day)`}>⚠ partial</span>}
+                          {isPartial && <span style={{ color: "#000000", fontSize: "0.7rem", marginLeft: "0.35rem" }} title={`${dayTicks.toLocaleString()} ticks (partial day)`}>⚠ partial</span>}
                         </td>
-                        <td style={{ color: day.day_buys > 0 ? "#10b981" : "#94a3b8" }}>{day.day_buys || "—"}</td>
-                        <td style={{ color: day.day_sells > 0 ? "#ef4444" : "#94a3b8" }}>{day.day_sells || "—"}</td>
+                        <td style={{ color: day.day_buys > 0 ? POSITIVE_COLOR : NEUTRAL_COLOR }}>{day.day_buys || "—"}</td>
+                        <td style={{ color: day.day_sells > 0 ? NEGATIVE_COLOR : NEUTRAL_COLOR }}>{day.day_sells || "—"}</td>
                         <td>{day.num_trades}</td>
-                        <td style={{ color: hasTrades ? "#e2e8f0" : "#94a3b8" }}>{hasTrades ? `${day.win_rate}%` : "—"}</td>
-                        <td style={{ color: hasTrades ? ((day.avg_trade_pct ?? 0) >= 0 ? "#10b981" : "#ef4444") : "#94a3b8" }}>
+                        <td style={{ color: hasTrades ? "#000000" : "#5a5a5a" }}>{hasTrades ? `${day.win_rate}%` : "—"}</td>
+                        <td style={{ color: hasTrades ? pnlColor(day.avg_trade_pct ?? 0) : NEUTRAL_COLOR }}>
                           {hasTrades ? formatSigned(day.avg_trade_pct ?? 0, "%") : "—"}
                         </td>
-                        <td style={{ color: hasTrades ? (day.total_pnl >= 0 ? "#10b981" : "#ef4444") : "#94a3b8" }}>
+                        <td style={{ color: hasTrades ? pnlColor(day.total_pnl) : NEUTRAL_COLOR }}>
                           {hasTrades ? formatSignedCurrency(day.total_pnl) : "—"}
                         </td>
-                        <td style={{ color: hasUnrealized ? ((day.unrealized_pnl ?? 0) >= 0 ? "#10b981" : "#ef4444") : "#94a3b8" }}>
+                        <td style={{ color: hasUnrealized ? pnlColor(day.unrealized_pnl ?? 0) : NEUTRAL_COLOR }}>
                           {hasUnrealized ? formatSignedCurrency(day.unrealized_pnl ?? 0) : hasPosition ? "$0.00" : "—"}
                         </td>
-                        <td style={{ color: hasPosition ? "#e2e8f0" : "#94a3b8" }}>
+                        <td style={{ color: hasPosition ? "#000000" : "#5a5a5a" }}>
                           {hasPosition ? `${(day.position_shares ?? 0).toFixed(2)} sh` : "—"}
                         </td>
                       </tr>
@@ -603,10 +612,10 @@ export default function TickBacktestView() {
             const chartPartial = medCount > 0 && chartTicks < medCount * 0.5;
             return (
             <div style={{ marginTop: "0.5rem" }}>
-              <div style={{ fontSize: "0.8rem", color: "#94a3b8", marginBottom: "0.25rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <div style={{ fontSize: "0.8rem", color: "#5a5a5a", marginBottom: "0.25rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
                 <span>Price &amp; VWAP — {chartDay}</span>
                 {chartPartial && (
-                  <span style={{ fontSize: "0.7rem", color: "#f59e0b", background: "rgba(245,158,11,0.1)", padding: "0.1rem 0.4rem", borderRadius: "4px" }}>
+                  <span style={{ fontSize: "0.7rem", color: "#000000", background: "#f3f3f3", padding: "0.1rem 0.4rem", borderRadius: "0" }}>
                     ⚠ Partial day ({chartTicks.toLocaleString()} ticks)
                   </span>
                 )}
@@ -628,7 +637,7 @@ export default function TickBacktestView() {
         <div className="backtest-batch-results" style={{ marginTop: "1.5rem" }}>
           <h3>Algorithm Comparison</h3>
           {runs.length === 0 ? (
-            <p style={{ color: "#94a3b8" }}>No runs saved yet. Run a tick backtest to get started.</p>
+            <p style={{ color: "#5a5a5a" }}>No runs saved yet. Run a tick backtest to get started.</p>
           ) : (
             <table>
               <thead>
@@ -655,14 +664,14 @@ export default function TickBacktestView() {
                     <td>{run.lookback_days ?? "—"}</td>
                     <td>{run.num_trades}</td>
                     <td>{run.win_rate.toFixed(1)}%</td>
-                    <td style={{ color: run.total_pnl >= 0 ? "#10b981" : "#ef4444" }}>
+                    <td style={{ color: pnlColor(run.total_pnl) }}>
                       {formatSignedCurrency(run.total_pnl)}
                     </td>
-                    <td style={{ color: run.total_pnl_pct >= 0 ? "#10b981" : "#ef4444" }}>
+                    <td style={{ color: pnlColor(run.total_pnl_pct) }}>
                       {formatSigned(run.total_pnl_pct, "%")}
                     </td>
                     <td>{formatCurrency(run.final_balance)}</td>
-                    <td style={{ fontSize: "0.7rem", color: "#94a3b8" }}>
+                    <td style={{ fontSize: "0.7rem", color: "#5a5a5a" }}>
                       {run.created_at ? new Date(run.created_at).toLocaleDateString() : "—"}
                     </td>
                     <td>
