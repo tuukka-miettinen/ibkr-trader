@@ -17,6 +17,7 @@ from app.db.live import LiveRepository
 from app.db.models import LiveSession, LiveSessionSymbol
 from app.models.market_data import Candle, Timeframe
 from app.providers.ibkr_trading import IBKRTradingClient
+from app.services.telegram import TelegramNotifier
 from app.strategy.sandbox import compile_tick_script
 from app.strategy.tick_backtest import CandleAggregator, PositionInfo, TickState
 
@@ -30,6 +31,7 @@ class SymbolRuntime:
     """In-memory state for a single symbol within a live session."""
     session_symbol_id: str
     symbol: str
+    algorithm_name: str
     algorithm_script: str
     on_tick_fn: callable
     aggregator: CandleAggregator
@@ -58,13 +60,14 @@ class LiveTradingEngine:
     def __init__(self) -> None:
         self._client: IBKRTradingClient | None = None
         self._repo = LiveRepository()
+        self._telegram = TelegramNotifier()
         self._sessions: dict[str, dict] = {}  # session_id → {session, symbols: {sym: SymbolRuntime}}
         self._ws_subscribers: dict[str, list[asyncio.Queue]] = {}  # session_id → list of queues
         self._loop: asyncio.AbstractEventLoop | None = None
 
     # ── Public API ────────────────────────────────────────────────────
 
-    async def start_session(self, session_id: str) -> None:
+    async def start_session(self, session_id: str, *, recovering: bool = False) -> None:
         """Start a live trading session — connect IBKR, subscribe to bars."""
         if session_id in self._sessions:
             raise RuntimeError(f"Session {session_id} is already running")
@@ -117,6 +120,7 @@ class LiveTradingEngine:
                 runtime = SymbolRuntime(
                     session_symbol_id=ss.id,
                     symbol=ss.symbol,
+                    algorithm_name=algo.name,
                     algorithm_script=algo.script,
                     on_tick_fn=on_tick_fn,
                     aggregator=CandleAggregator(ss.symbol, CANDLE_TIMEFRAMES),
@@ -134,6 +138,12 @@ class LiveTradingEngine:
                     strategy_state=strategy_state,
                     last_price=ss.last_price or 0.0,
                 )
+
+                seed_candles = await self._repo.get_seed_candles(db, ss.id)
+                for tf, candles in seed_candles.items():
+                    if candles:
+                        runtime.aggregator.seed_candles(tf, [c.model_copy(update={"symbol": ss.symbol}) for c in candles])
+
                 symbol_runtimes[ss.symbol] = runtime
 
         # Connect IBKR trading client
@@ -177,6 +187,7 @@ class LiveTradingEngine:
         # Store session state
         self._sessions[session_id] = {
             "session": live_session,
+            "session_name": live_session.name,
             "symbols": symbol_runtimes,
             "order_type": live_session.order_type,
             "max_daily_loss": live_session.max_daily_loss,
@@ -188,6 +199,13 @@ class LiveTradingEngine:
             # Pre-load historical candles so indicators (RSI, VWAP) have
             # warm-up data from the start instead of waiting 30+ minutes.
             for tf in CANDLE_TIMEFRAMES:
+                existing_seed = runtime.aggregator.completed_candles(tf)
+                if recovering and existing_seed:
+                    logger.info(
+                        "Recovered %d persisted %s candles for %s",
+                        len(existing_seed), tf, sym,
+                    )
+                    continue
                 try:
                     historical = self._client.get_historical_candles(sym, tf, "1 D")
                     if historical:
@@ -203,7 +221,13 @@ class LiveTradingEngine:
                             "Seeded %d %s candles for %s", len(historical), tf, sym,
                         )
                 except Exception:
-                    logger.warning("Could not pre-load %s candles for %s", tf, sym, exc_info=True)
+                    if existing_seed:
+                        logger.warning(
+                            "Could not refresh %s candles for %s — using %d persisted candles",
+                            tf, sym, len(existing_seed), exc_info=True,
+                        )
+                    else:
+                        logger.warning("Could not pre-load %s candles for %s", tf, sym, exc_info=True)
 
             self._client.subscribe_realtime_bars(
                 sym, lambda candle, _sid=session_id, _sym=sym: self._on_tick(_sid, _sym, candle)
@@ -327,6 +351,60 @@ class LiveTradingEngine:
             if symbol is not None and sym != symbol.upper():
                 continue
             await self._flush_runtime_ticks(rt)
+
+    def _collect_open_positions(self, state: dict) -> list[dict]:
+        positions: list[dict] = []
+        for symbol, rt in state["symbols"].items():
+            if rt.position_shares <= 0:
+                continue
+            avg_price = rt.position_cost / rt.position_shares if rt.position_shares else 0.0
+            market_value = rt.position_shares * rt.last_price if rt.last_price > 0 else rt.position_cost
+            unrealized_pnl = market_value - rt.position_cost
+            positions.append({
+                "symbol": symbol,
+                "shares": round(rt.position_shares, 8),
+                "avg_price": round(avg_price, 4),
+                "last_price": round(rt.last_price or avg_price, 4),
+                "market_value": round(market_value, 4),
+                "unrealized_pnl": round(unrealized_pnl, 4),
+            })
+        return positions
+
+    async def _notify_trade(
+        self,
+        session_id: str,
+        state: dict,
+        rt: SymbolRuntime,
+        *,
+        symbol: str,
+        side: str,
+        order_type: str,
+        shares: float,
+        price: float,
+        notional: float,
+        executed_at: datetime,
+        cash_remaining: float,
+        pnl: float | None = None,
+        pnl_pct: float | None = None,
+        ibkr_order_id: int | None = None,
+    ) -> None:
+        await self._telegram.send_trade_notification(
+            session_name=state.get("session_name", session_id),
+            symbol=symbol,
+            strategy_name=rt.algorithm_name,
+            side=side,
+            order_type=order_type,
+            shares=round(shares, 8),
+            price=round(price, 4),
+            notional=round(notional, 4),
+            cash_remaining=round(cash_remaining, 4),
+            pnl=round(pnl, 4) if pnl is not None else None,
+            pnl_pct=round(pnl_pct, 4) if pnl_pct is not None else None,
+            executed_at=executed_at,
+            delayed=rt.delayed,
+            ibkr_order_id=ibkr_order_id,
+            positions=self._collect_open_positions(state),
+        )
 
     # ── WebSocket subscription ────────────────────────────────────────
 
@@ -608,6 +686,20 @@ class LiveTradingEngine:
                 "time": candle.time.isoformat(),
                 "cash_remaining": round(rt.cash, 4),
             })
+            await self._notify_trade(
+                session_id,
+                state,
+                rt,
+                symbol=symbol,
+                side="buy",
+                order_type=order_type,
+                shares=shares,
+                price=candle.close,
+                notional=cost,
+                executed_at=candle.time,
+                cash_remaining=rt.cash,
+                ibkr_order_id=ibkr_order_id,
+            )
 
             logger.info("BUY %s: %.4f shares @ %.4f ($%.2f)", symbol, shares, candle.close, cost)
 
@@ -692,6 +784,22 @@ class LiveTradingEngine:
                 "time": candle.time.isoformat(),
                 "cash_remaining": round(rt.cash, 4),
             })
+            await self._notify_trade(
+                session_id,
+                state,
+                rt,
+                symbol=symbol,
+                side="sell",
+                order_type=order_type,
+                shares=sold_shares,
+                price=candle.close,
+                notional=proceeds,
+                executed_at=candle.time,
+                cash_remaining=rt.cash,
+                pnl=dollar_pnl,
+                pnl_pct=pnl_pct,
+                ibkr_order_id=ibkr_order_id,
+            )
 
             logger.info(
                 "SELL %s: %.4f shares @ %.4f — P&L: $%.2f (%.2f%%)",
@@ -753,7 +861,7 @@ class LiveTradingEngine:
         for live_session in running:
             logger.info("Recovering live session %s (%s)", live_session.id, live_session.name)
             try:
-                await self.start_session(live_session.id)
+                await self.start_session(live_session.id, recovering=True)
                 logger.info("Session %s recovered successfully (warming up)", live_session.id)
             except Exception:
                 logger.exception("Failed to recover session %s", live_session.id)
@@ -762,6 +870,30 @@ class LiveTradingEngine:
                         db, live_session.id, "error",
                         error_message="Failed to recover after server restart",
                     )
+
+    async def shutdown(self) -> None:
+        """Persist live state and cleanly disconnect IBKR during server shutdown."""
+        for session_id in list(self._sessions):
+            try:
+                await self._flush_captured_ticks(session_id)
+                await self._persist_all_symbols(session_id)
+            except Exception:
+                logger.exception("Error persisting live session %s during shutdown", session_id)
+
+        if self._client is not None:
+            try:
+                self._client.disconnect()
+            except Exception:
+                logger.exception("Error unsubscribing IBKR bars during shutdown")
+
+        try:
+            from app.providers.ibkr_shared import shutdown as shutdown_shared_ibkr
+            shutdown_shared_ibkr()
+        except Exception:
+            logger.exception("Error shutting down shared IBKR connection")
+
+        self._sessions.clear()
+        self._ws_subscribers.clear()
 
 
 # Module-level singleton

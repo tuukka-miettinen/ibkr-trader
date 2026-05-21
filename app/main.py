@@ -29,7 +29,13 @@ async def lifespan(app: FastAPI):
         await live_engine.recover_sessions()
     except Exception:
         logger.exception("Error recovering live sessions on startup")
-    yield
+    try:
+        yield
+    finally:
+        try:
+            await live_engine.shutdown()
+        except Exception:
+            logger.exception("Error shutting down live engine")
 
 
 app = FastAPI(title="Trader API", version="0.1.0", lifespan=lifespan)

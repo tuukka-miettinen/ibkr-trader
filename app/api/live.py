@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import suppress
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 from pydantic import BaseModel, Field
 
 from app.db.database import get_db_context
@@ -485,7 +487,12 @@ async def live_ws(websocket: WebSocket, session_id: str) -> None:
 
     if not live_engine.is_session_running(session_id):
         await websocket.send_json({"type": "error", "message": "Session is not running"})
-        await websocket.close()
+        if (
+            websocket.client_state is not WebSocketState.DISCONNECTED
+            and websocket.application_state is WebSocketState.CONNECTED
+        ):
+            with suppress(RuntimeError, AttributeError):
+                await websocket.close()
         return
 
     queue = live_engine.subscribe_ws(session_id)

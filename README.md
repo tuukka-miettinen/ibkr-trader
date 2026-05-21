@@ -81,3 +81,24 @@ Key variables:
 | `VNC_SERVER_PASSWORD` | — | VNC password (blank = VNC disabled) |
 | `IBKR_TRADING_MODE` | `paper` | `paper` or `live` |
 | `READ_ONLY_API` | `yes` | `yes` = no order execution |
+| `TELEGRAM_NOTIFICATIONS_ENABLED` | `true` | Enable Telegram trade notifications |
+| `TELEGRAM_BOT_TOKEN` | — | Bot token used for notifications |
+| `TELEGRAM_CHAT_ID` | — | Telegram group/chat ID to receive notifications |
+
+## Telegram trade notifications
+
+Live paper-trading sessions can send a Telegram message immediately after each executed **buy** and **sell**.
+Each message also includes a short snapshot of the session's currently open positions.
+
+Configure these in `.env`:
+
+```env
+TELEGRAM_NOTIFICATIONS_ENABLED=true
+TELEGRAM_BOT_TOKEN=123456:your_bot_token
+TELEGRAM_CHAT_ID=-1001234567890
+```
+
+Notes:
+- Add the bot to your target Telegram group.
+- Use the group's chat ID for `TELEGRAM_CHAT_ID`.
+- If `TELEGRAM_BOT_TOKEN` or `TELEGRAM_CHAT_ID` is blank, notifications stay disabled.

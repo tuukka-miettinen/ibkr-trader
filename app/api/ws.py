@@ -4,6 +4,7 @@ import asyncio
 from contextlib import suppress
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 from app.models.market_data import SubscriptionRequest
 from app.providers.base import MarketDataError
@@ -81,5 +82,9 @@ async def market_socket(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         return
     finally:
-        with suppress(RuntimeError):
-            await websocket.close()
+        if (
+            websocket.client_state is not WebSocketState.DISCONNECTED
+            and websocket.application_state is WebSocketState.CONNECTED
+        ):
+            with suppress(RuntimeError, AttributeError):
+                await websocket.close()

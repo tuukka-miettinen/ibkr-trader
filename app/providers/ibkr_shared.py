@@ -127,3 +127,25 @@ def disconnect() -> None:
         ib.disconnect()
     _connected = False
     logger.info("IBKR shared connection disconnected")
+
+
+def shutdown() -> None:
+    """Fully tear down the shared IB resources for process shutdown."""
+    global _ib, _executor, _executor_thread_id, _connected
+
+    if _executor is not None:
+        try:
+            run_on_ib_thread(disconnect)
+        except Exception:
+            logger.exception("Error disconnecting shared IBKR connection during shutdown")
+        _executor.shutdown(wait=False, cancel_futures=True)
+        _executor = None
+    else:
+        try:
+            disconnect()
+        except Exception:
+            logger.exception("Error disconnecting shared IBKR connection during shutdown")
+
+    _executor_thread_id = None
+    _connected = False
+    _ib = None
