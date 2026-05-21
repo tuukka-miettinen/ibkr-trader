@@ -10,7 +10,7 @@ import math
 import os
 import threading
 from datetime import UTC, datetime
-from typing import Callable
+from typing import Callable, Literal
 
 from ib_insync import LimitOrder, MarketOrder, Stock, Trade
 
@@ -18,6 +18,8 @@ from app.models.market_data import Candle, Timeframe
 from app.providers.base import MarketDataError
 
 logger = logging.getLogger(__name__)
+
+MarketDataMode = Literal["realtime", "delayed"]
 
 
 class IBKRTradingClient:
@@ -47,6 +49,14 @@ class IBKRTradingClient:
     def connect(self) -> None:
         from app.providers.ibkr_shared import run_on_ib_thread, ensure_connected
         run_on_ib_thread(ensure_connected)
+
+    def set_market_data_mode(self, mode: MarketDataMode) -> None:
+        self._run_on_ib_thread(lambda: self._set_market_data_mode_sync(mode))
+
+    def _set_market_data_mode_sync(self, mode: MarketDataMode) -> None:
+        from app.providers.ibkr_shared import ensure_connected, set_market_data_mode
+        ensure_connected()
+        set_market_data_mode(mode)
 
     @property
     def on_error(self) -> Callable[[int, int, str], None] | None:
@@ -96,24 +106,54 @@ class IBKRTradingClient:
     def _contract(self, symbol: str) -> Stock:
         return Stock(symbol.upper(), self._exchange, self._currency)
 
-    # ── Real-time 5-second bars (with polling fallback) ─────────────
+    def _qualified_contract(self, symbol: str) -> Stock:
+        sym = symbol.upper()
+        contract = self._contract(sym)
+        ib = self._get_ib()
+        qualified = ib.qualifyContracts(contract)
+        if not qualified:
+            raise MarketDataError(f"Contract not found for {sym}")
+        return qualified[0]
 
-    def subscribe_realtime_bars(self, symbol: str, callback: Callable[[Candle], None]) -> None:
-        self._run_on_ib_thread(lambda: self._subscribe_bars_sync(symbol, callback))
+    # ── 5-second bars ───────────────────────────────────────────────
 
-    def _subscribe_bars_sync(self, symbol: str, callback: Callable[[Candle], None]) -> None:
+    def subscribe_realtime_bars(
+        self,
+        symbol: str,
+        callback: Callable[[Candle], None],
+        *,
+        market_data_mode: MarketDataMode = "realtime",
+    ) -> bool:
+        return self._run_on_ib_thread(
+            lambda: self._subscribe_bars_sync(symbol, callback, market_data_mode=market_data_mode)
+        )
+
+    def _subscribe_bars_sync(
+        self,
+        symbol: str,
+        callback: Callable[[Candle], None],
+        *,
+        market_data_mode: MarketDataMode = "realtime",
+    ) -> bool:
         sym = symbol.upper()
         if sym in self._bar_subscriptions or sym in self._polling_timers:
-            return
+            return sym in self._polling_timers
 
         from app.providers.ibkr_shared import ensure_connected
         ensure_connected()
+        self._set_market_data_mode_sync(market_data_mode)
 
-        contract = self._contract(sym)
+        if market_data_mode == "delayed":
+            self._start_polling(sym, callback)
+            return True
+
+        contract = self._qualified_contract(sym)
         ib = self._get_ib()
 
         error_event = threading.Event()
         got_bar = threading.Event()
+        latest_error: dict[str, str | int | None] = {"code": None, "message": None}
+        request_req_id: dict[str, int | None] = {"value": None}
 
         def _on_bar_update(bars, has_new_bar):
             if not has_new_bar or not bars:
@@ -136,11 +176,26 @@ class IBKRTradingClient:
                 logger.exception("Error in real-time bar callback for %s", sym)
 
         def _on_error(reqId, errorCode, errorString, *_args):
-            if errorCode == 420:
-                error_event.set()
+            if errorCode not in {420, 354, 10167}:
+                return
+            tracked_req_id = request_req_id["value"]
+            if tracked_req_id is not None and reqId not in {-1, tracked_req_id}:
+                return
+            latest_error["code"] = errorCode
+            latest_error["message"] = errorString
+            error_event.set()
 
         ib.errorEvent += _on_error
         bars = ib.reqRealTimeBars(contract, barSize=5, whatToShow="TRADES", useRTH=False)
+        request_req_id["value"] = getattr(bars, "reqId", None)
+        logger.info(
+            "Requested real-time bars for %s (reqId=%s, conId=%s, exchange=%s, primaryExchange=%s)",
+            sym,
+            request_req_id["value"],
+            getattr(contract, "conId", None),
+            getattr(contract, "exchange", None),
+            getattr(contract, "primaryExchange", None),
+        )
         bars.updateEvent += _on_bar_update
 
         ib.sleep(2)
@@ -148,15 +203,20 @@ class IBKRTradingClient:
 
         if error_event.is_set() and not got_bar.is_set():
             ib.cancelRealTimeBars(bars)
-            logger.warning(
-                "Real-time bars unavailable for %s — falling back to historical polling",
-                sym,
+            error_code = latest_error["code"]
+            error_message = latest_error["message"] or "unknown error"
+            raise MarketDataError(
+                f"Real-time market data unavailable for {sym} "
+                f"(IBKR error {error_code}: {error_message}; "
+                f"reqId={request_req_id['value']}, conId={getattr(contract, 'conId', None)}, "
+                f"exchange={getattr(contract, 'exchange', None)}, primaryExchange={getattr(contract, 'primaryExchange', None)}). "
+                "No delayed fallback was attempted."
             )
-            self._start_polling(sym, callback)
-        else:
-            self._bar_subscriptions[sym] = bars
-            self._bar_callbacks[sym] = callback
-            logger.info("Subscribed to real-time bars for %s", sym)
+
+        self._bar_subscriptions[sym] = bars
+        self._bar_callbacks[sym] = callback
+        logger.info("Subscribed to real-time bars for %s", sym)
+        return False
 
     def _start_polling(self, symbol: str, callback: Callable[[Candle], None]) -> None:
         stop_event = threading.Event()
@@ -187,7 +247,8 @@ class IBKRTradingClient:
 
     def _poll_latest_bar(self, symbol: str) -> Candle | None:
         sym = symbol.upper()
-        contract = self._contract(sym)
+        self._set_market_data_mode_sync("delayed")
+        contract = self._qualified_contract(sym)
         ib = self._get_ib()
         bars = ib.reqHistoricalData(
             contract,
@@ -243,14 +304,24 @@ class IBKRTradingClient:
     }
 
     def get_historical_candles(
-        self, symbol: str, timeframe: Timeframe, duration: str = "1 D"
+        self,
+        symbol: str,
+        timeframe: Timeframe,
+        duration: str = "1 D",
+        *,
+        market_data_mode: MarketDataMode = "realtime",
     ) -> list[Candle]:
         return self._run_on_ib_thread(
-            lambda: self._get_historical_sync(symbol, timeframe, duration)
+            lambda: self._get_historical_sync(symbol, timeframe, duration, market_data_mode=market_data_mode)
         )
 
     def _get_historical_sync(
-        self, symbol: str, timeframe: Timeframe, duration: str
+        self,
+        symbol: str,
+        timeframe: Timeframe,
+        duration: str,
+        *,
+        market_data_mode: MarketDataMode = "realtime",
     ) -> list[Candle]:
         sym = symbol.upper()
         bar_size = self._BAR_SIZE_MAP.get(timeframe)
@@ -259,8 +330,9 @@ class IBKRTradingClient:
 
         from app.providers.ibkr_shared import ensure_connected
         ensure_connected()
+        self._set_market_data_mode_sync(market_data_mode)
 
-        contract = self._contract(sym)
+        contract = self._qualified_contract(sym)
         ib = self._get_ib()
         bars = ib.reqHistoricalData(
             contract,
@@ -296,61 +368,118 @@ class IBKRTradingClient:
 
     # ── Connection test ───────────────────────────────────────────────
 
-    def test_symbol(self, symbol: str) -> dict:
-        return self._run_on_ib_thread(lambda: self._test_symbol_sync(symbol))
+    def test_symbol(self, symbol: str, market_data_mode: MarketDataMode = "realtime") -> dict:
+        return self._run_on_ib_thread(lambda: self._test_symbol_sync(symbol, market_data_mode))
 
-    def _test_symbol_sync(self, symbol: str) -> dict:
+    def debug_market_data(self, symbol: str, market_data_mode: MarketDataMode = "realtime") -> dict:
+        return self._run_on_ib_thread(lambda: self._debug_market_data_sync(symbol, market_data_mode))
+
+    def _test_symbol_sync(self, symbol: str, market_data_mode: MarketDataMode) -> dict:
         from app.providers.ibkr_shared import ensure_connected
         ensure_connected()
+        self._set_market_data_mode_sync(market_data_mode)
 
         sym = symbol.upper()
-        contract = self._contract(sym)
         ib = self._get_ib()
 
-        qualified = ib.qualifyContracts(contract)
-        if not qualified:
-            return {
-                "symbol": sym,
-                "ok": False,
-                "error": f"Contract not found for {sym}",
-                "exchange": None,
-                "last_price": None,
-            }
-        c = qualified[0]
-        exchange = c.primaryExchange or c.exchange
-
-        last_price = None
-        has_data = False
         try:
-            bars = ib.reqHistoricalData(
-                c,
-                endDateTime="",
-                durationStr="1 D",
-                barSizeSetting="1 min",
-                whatToShow="TRADES",
-                useRTH=False,
-                formatDate=2,
-                keepUpToDate=False,
-            )
-            if bars:
-                last_price = round(float(bars[-1].close), 4)
-                has_data = True
-        except Exception as exc:
+            c = self._qualified_contract(sym)
+        except MarketDataError as exc:
             return {
                 "symbol": sym,
                 "ok": False,
                 "error": str(exc),
-                "exchange": exchange,
+                "exchange": None,
                 "last_price": None,
+                "market_data_mode": market_data_mode,
+            }
+        exchange = c.primaryExchange or c.exchange
+
+        if market_data_mode == "delayed":
+            try:
+                bars = ib.reqHistoricalData(
+                    c,
+                    endDateTime="",
+                    durationStr="1 D",
+                    barSizeSetting="1 min",
+                    whatToShow="TRADES",
+                    useRTH=False,
+                    formatDate=2,
+                    keepUpToDate=False,
+                )
+            except Exception as exc:
+                return {
+                    "symbol": sym,
+                    "ok": False,
+                    "error": str(exc),
+                    "exchange": exchange,
+                    "last_price": None,
+                    "market_data_mode": market_data_mode,
+                }
+
+            if not bars:
+                return {
+                    "symbol": sym,
+                    "ok": False,
+                    "error": "Delayed historical data unavailable for this symbol",
+                    "exchange": exchange,
+                    "last_price": None,
+                    "market_data_mode": market_data_mode,
+                }
+
+            return {
+                "symbol": sym,
+                "ok": True,
+                "error": None,
+                "exchange": exchange,
+                "last_price": round(float(bars[-1].close), 4),
+                "market_data_mode": market_data_mode,
+                "note": "Delayed market data is enabled; orders stay paper-only.",
             }
 
-        if not has_data:
+        error_event = threading.Event()
+        latest_error: dict[str, str | int | None] = {"code": None, "message": None}
+        request_req_id: dict[str, int | None] = {"value": None}
+
+        def _on_error(reqId, errorCode, errorString, *_args):
+            if errorCode not in {420, 354, 10167}:
+                return
+            tracked_req_id = request_req_id["value"]
+            if tracked_req_id is not None and reqId not in {-1, tracked_req_id}:
+                return
+            latest_error["code"] = errorCode
+            latest_error["message"] = errorString
+            error_event.set()
+
+        ib.errorEvent += _on_error
+        bars = ib.reqRealTimeBars(c, barSize=5, whatToShow="TRADES", useRTH=False)
+        request_req_id["value"] = getattr(bars, "reqId", None)
+        logger.info(
+            "Testing real-time bars for %s (reqId=%s, conId=%s, exchange=%s, primaryExchange=%s)",
+            sym,
+            request_req_id["value"],
+            getattr(c, "conId", None),
+            getattr(c, "exchange", None),
+            getattr(c, "primaryExchange", None),
+        )
+        ib.sleep(2)
+        ib.cancelRealTimeBars(bars)
+        ib.errorEvent -= _on_error
+
+        if error_event.is_set():
             return {
                 "symbol": sym,
                 "ok": False,
-                "error": "No data available — market may be closed",
+                "error": (
+                    f"Real-time market data unavailable for {sym} "
+                    f"(IBKR error {latest_error['code']}: {latest_error['message']}; "
+                    f"reqId={request_req_id['value']}, conId={getattr(c, 'conId', None)}, "
+                    f"exchange={getattr(c, 'exchange', None)}, primaryExchange={getattr(c, 'primaryExchange', None)}). "
+                    "No delayed fallback will be used."
+                ),
                 "exchange": exchange,
                 "last_price": None,
+                "market_data_mode": market_data_mode,
             }
 
         return {
@@ -358,9 +487,164 @@ class IBKRTradingClient:
             "ok": True,
             "error": None,
             "exchange": exchange,
-            "last_price": last_price,
-            "note": "Will use real-time bars if available, otherwise delayed polling",
+            "last_price": None,
+            "market_data_mode": market_data_mode,
+            "note": (
+                "Real-time market data request accepted. "
+                f"reqId={request_req_id['value']}, conId={getattr(c, 'conId', None)}, "
+                f"exchange={getattr(c, 'exchange', None)}, primaryExchange={getattr(c, 'primaryExchange', None)}. "
+                "No delayed fallback will be used."
+            ),
         }
+
+    def _debug_market_data_sync(self, symbol: str, market_data_mode: MarketDataMode) -> dict:
+        from app.providers.ibkr_shared import ensure_connected
+        ensure_connected()
+        self._set_market_data_mode_sync(market_data_mode)
+
+        sym = symbol.upper()
+        ib = self._get_ib()
+
+        result: dict[str, object] = {
+            "symbol": sym,
+            "market_data_mode": market_data_mode,
+            "contract": {"ok": False},
+            "historical_1m": {"ok": False},
+            "realtime_bars": {"ok": False},
+        }
+
+        try:
+            contract = self._qualified_contract(sym)
+        except MarketDataError as exc:
+            result["contract"] = {"ok": False, "error": str(exc)}
+            result["historical_1m"] = {"ok": False, "error": "Skipped because contract qualification failed"}
+            result["realtime_bars"] = {"ok": False, "error": "Skipped because contract qualification failed"}
+            return result
+
+        result["contract"] = {
+            "ok": True,
+            "conId": getattr(contract, "conId", None),
+            "exchange": getattr(contract, "exchange", None),
+            "primaryExchange": getattr(contract, "primaryExchange", None),
+            "localSymbol": getattr(contract, "localSymbol", None),
+            "tradingClass": getattr(contract, "tradingClass", None),
+        }
+
+        hist_error = threading.Event()
+        hist_latest_error: dict[str, str | int | None] = {"code": None, "message": None}
+        hist_req_id: dict[str, int | None] = {"value": None}
+
+        def _on_hist_error(reqId, errorCode, errorString, *_args):
+            tracked_req_id = hist_req_id["value"]
+            if tracked_req_id is not None and reqId not in {-1, tracked_req_id}:
+                return
+            if errorCode not in {162, 200, 420, 354, 10167}:
+                return
+            hist_latest_error["code"] = errorCode
+            hist_latest_error["message"] = errorString
+            hist_error.set()
+
+        ib.errorEvent += _on_hist_error
+        historical = ib.reqHistoricalData(
+            contract,
+            endDateTime="",
+            durationStr="1 D",
+            barSizeSetting="1 min",
+            whatToShow="TRADES",
+            useRTH=False,
+            formatDate=2,
+            keepUpToDate=False,
+        )
+        hist_req_id["value"] = getattr(historical, "reqId", None)
+        ib.sleep(1)
+        ib.errorEvent -= _on_hist_error
+
+        if hist_error.is_set():
+            result["historical_1m"] = {
+                "ok": False,
+                "reqId": hist_req_id["value"],
+                "error": f"IBKR error {hist_latest_error['code']}: {hist_latest_error['message']}",
+            }
+        elif not historical:
+            result["historical_1m"] = {
+                "ok": False,
+                "reqId": hist_req_id["value"],
+                "error": "No bars returned",
+            }
+        else:
+            last_bar = historical[-1]
+            last_time = last_bar.date
+            if isinstance(last_time, str):
+                last_time = datetime.fromisoformat(last_time)
+            if isinstance(last_time, datetime) and last_time.tzinfo is None:
+                last_time = last_time.replace(tzinfo=UTC)
+            result["historical_1m"] = {
+                "ok": True,
+                "reqId": hist_req_id["value"],
+                "bars": len(historical),
+                "last_time": last_time.isoformat() if hasattr(last_time, "isoformat") else str(last_time),
+                "last_close": round(float(last_bar.close), 4),
+            }
+
+        if market_data_mode == "delayed":
+            result["realtime_bars"] = {
+                "ok": False,
+                "error": "Skipped in delayed mode",
+            }
+            return result
+
+        rt_error = threading.Event()
+        got_bar = threading.Event()
+        rt_latest_error: dict[str, str | int | None] = {"code": None, "message": None}
+        rt_req_id: dict[str, int | None] = {"value": None}
+
+        def _on_rt_error(reqId, errorCode, errorString, *_args):
+            tracked_req_id = rt_req_id["value"]
+            if tracked_req_id is not None and reqId not in {-1, tracked_req_id}:
+                return
+            if errorCode not in {420, 354, 10167}:
+                return
+            rt_latest_error["code"] = errorCode
+            rt_latest_error["message"] = errorString
+            rt_error.set()
+
+        def _on_rt_update(bars, has_new_bar):
+            if has_new_bar and bars:
+                got_bar.set()
+
+        ib.errorEvent += _on_rt_error
+        realtime = ib.reqRealTimeBars(contract, barSize=5, whatToShow="TRADES", useRTH=False)
+        rt_req_id["value"] = getattr(realtime, "reqId", None)
+        realtime.updateEvent += _on_rt_update
+        ib.sleep(2)
+        try:
+            ib.cancelRealTimeBars(realtime)
+        finally:
+            ib.errorEvent -= _on_rt_error
+
+        if rt_error.is_set() and not got_bar.is_set():
+            result["realtime_bars"] = {
+                "ok": False,
+                "reqId": rt_req_id["value"],
+                "error": f"IBKR error {rt_latest_error['code']}: {rt_latest_error['message']}",
+            }
+        else:
+            first_time = realtime[0].time if realtime else None
+            last_time = realtime[-1].time if realtime else None
+            if isinstance(first_time, datetime) and first_time.tzinfo is None:
+                first_time = first_time.replace(tzinfo=UTC)
+            if isinstance(last_time, datetime) and last_time.tzinfo is None:
+                last_time = last_time.replace(tzinfo=UTC)
+            result["realtime_bars"] = {
+                "ok": True,
+                "reqId": rt_req_id["value"],
+                "bar_count": len(realtime),
+                "first_bar_time": first_time.isoformat() if hasattr(first_time, "isoformat") else None,
+                "last_bar_time": last_time.isoformat() if hasattr(last_time, "isoformat") else None,
+                "received_bar": got_bar.is_set(),
+            }
+
+        return result
 
     # ── Order execution ───────────────────────────────────────────────
 

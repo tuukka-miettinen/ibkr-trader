@@ -46,6 +46,7 @@ class CreateSessionRequest(BaseModel):
     max_daily_loss: float = Field(default=500.0, gt=0)
     max_total_exposure: float = Field(default=50000.0, gt=0)
     order_type: str = Field(default="market", pattern=r"^(market|limit)$")
+    market_data_mode: str = Field(default="realtime", pattern=r"^(realtime|delayed)$")
 
 
 class CompareSessionRequest(BaseModel):
@@ -81,6 +82,7 @@ async def create_session(body: CreateSessionRequest) -> dict:
             db,
             name=body.name,
             order_type=body.order_type,
+            market_data_mode=body.market_data_mode,
             position_size=body.position_size,
             max_entries=body.max_entries,
             max_daily_loss=body.max_daily_loss,
@@ -112,6 +114,7 @@ async def create_session(body: CreateSessionRequest) -> dict:
             "name": live_session.name,
             "status": live_session.status,
             "order_type": live_session.order_type,
+            "market_data_mode": live_session.market_data_mode,
             "position_size": live_session.position_size,
             "max_entries": live_session.max_entries,
             "max_daily_loss": live_session.max_daily_loss,
@@ -123,7 +126,7 @@ async def create_session(body: CreateSessionRequest) -> dict:
 
 
 @router.get("/test-symbol/{symbol}")
-async def test_symbol_connection(symbol: str) -> dict:
+async def test_symbol_connection(symbol: str, market_data_mode: str = "realtime") -> dict:
     """Test IBKR connectivity and market data permissions for a symbol."""
     from app.providers.ibkr_trading import IBKRTradingClient
 
@@ -142,10 +145,11 @@ async def test_symbol_connection(symbol: str) -> dict:
             "error": f"Cannot connect to IBKR: {exc}",
             "exchange": None,
             "last_price": None,
+            "market_data_mode": market_data_mode,
         }
 
     try:
-        result = client.test_symbol(symbol)
+        result = client.test_symbol(symbol, market_data_mode=market_data_mode)
     except Exception as exc:
         result = {
             "symbol": symbol.upper(),
@@ -153,8 +157,42 @@ async def test_symbol_connection(symbol: str) -> dict:
             "error": str(exc),
             "exchange": None,
             "last_price": None,
+            "market_data_mode": market_data_mode,
         }
     return result
+
+
+@router.get("/debug-market-data/{symbol}")
+async def debug_market_data(symbol: str, market_data_mode: str = "realtime") -> dict:
+    """Run a small market-data diagnostic for one symbol."""
+    from app.providers.ibkr_trading import IBKRTradingClient
+
+    client = live_engine._client  # noqa: SLF001
+    if client is None:
+        client = IBKRTradingClient.from_env()
+        live_engine._client = client  # noqa: SLF001
+    try:
+        if not client.is_connected:
+            client.connect()
+    except Exception as exc:
+        return {
+            "symbol": symbol.upper(),
+            "market_data_mode": market_data_mode,
+            "contract": {"ok": False, "error": f"Cannot connect to IBKR: {exc}"},
+            "historical_1m": {"ok": False, "error": "Skipped because IBKR connection failed"},
+            "realtime_bars": {"ok": False, "error": "Skipped because IBKR connection failed"},
+        }
+
+    try:
+        return client.debug_market_data(symbol, market_data_mode=market_data_mode)
+    except Exception as exc:
+        return {
+            "symbol": symbol.upper(),
+            "market_data_mode": market_data_mode,
+            "contract": {"ok": False, "error": str(exc)},
+            "historical_1m": {"ok": False, "error": "Diagnostic aborted"},
+            "realtime_bars": {"ok": False, "error": "Diagnostic aborted"},
+        }
 
 
 @router.get("/account")
@@ -197,6 +235,7 @@ async def list_sessions() -> dict:
                 "name": s.name,
                 "status": s.status,
                 "order_type": s.order_type,
+                "market_data_mode": s.market_data_mode,
                 "max_daily_loss": s.max_daily_loss,
                 "created_at": _iso_utc(s.created_at),
                 "started_at": _iso_utc(s.started_at),
@@ -227,6 +266,7 @@ async def rename_session(session_id: str, body: RenameSessionRequest) -> dict:
             "name": live_session.name,
             "status": live_session.status,
             "order_type": live_session.order_type,
+            "market_data_mode": live_session.market_data_mode,
             "position_size": live_session.position_size,
             "max_entries": live_session.max_entries,
             "max_daily_loss": live_session.max_daily_loss,
@@ -281,6 +321,7 @@ async def get_session(session_id: str) -> dict:
             "name": s.name,
             "status": s.status if not live_engine.is_session_running(s.id) else "running",
             "order_type": s.order_type,
+            "market_data_mode": s.market_data_mode,
             "position_size": s.position_size,
             "max_entries": s.max_entries,
             "max_daily_loss": s.max_daily_loss,
@@ -398,6 +439,7 @@ async def clone_session(session_id: str) -> dict:
             db,
             name=f"{source.name} (copy)",
             order_type=source.order_type,
+            market_data_mode=source.market_data_mode,
             position_size=source.position_size,
             max_entries=source.max_entries,
             max_daily_loss=source.max_daily_loss,
@@ -429,6 +471,7 @@ async def clone_session(session_id: str) -> dict:
             "name": new_session.name,
             "status": new_session.status,
             "order_type": new_session.order_type,
+            "market_data_mode": new_session.market_data_mode,
             "position_size": new_session.position_size,
             "max_entries": new_session.max_entries,
             "max_daily_loss": new_session.max_daily_loss,

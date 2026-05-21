@@ -29,6 +29,45 @@ const POSITIVE_COLOR = "#15803d";
 const NEGATIVE_COLOR = "#b91c1c";
 const NEUTRAL_COLOR = "#5a5a5a";
 
+type SymbolTestResult = {
+  ok: boolean;
+  exchange?: string;
+  last_price?: number | null;
+  error?: string;
+  note?: string;
+};
+
+type SymbolDebugResult = {
+  symbol: string;
+  market_data_mode: "realtime" | "delayed";
+  contract?: {
+    ok: boolean;
+    error?: string;
+    conId?: number | null;
+    exchange?: string | null;
+    primaryExchange?: string | null;
+    localSymbol?: string | null;
+    tradingClass?: string | null;
+  };
+  historical_1m?: {
+    ok: boolean;
+    error?: string;
+    reqId?: number | null;
+    bars?: number;
+    last_time?: string | null;
+    last_close?: number | null;
+  };
+  realtime_bars?: {
+    ok: boolean;
+    error?: string;
+    reqId?: number | null;
+    bar_count?: number;
+    first_bar_time?: string | null;
+    last_bar_time?: string | null;
+    received_bar?: boolean;
+  };
+};
+
 function pnlColor(v: number) {
   return v > 0 ? POSITIVE_COLOR : v < 0 ? NEGATIVE_COLOR : NEUTRAL_COLOR;
 }
@@ -57,6 +96,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
   const [formMaxTotalExposure, setFormMaxTotalExposure] = useState(50000);
   const [formMaxDailyLoss, setFormMaxDailyLoss] = useState(500);
   const [formOrderType, setFormOrderType] = useState<"market" | "limit">("market");
+  const [formMarketDataMode, setFormMarketDataMode] = useState<"realtime" | "delayed">("realtime");
   const [algorithms, setAlgorithms] = useState<Algorithm[]>([]);
 
   // ── State: active session detail ──
@@ -75,7 +115,8 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
   const wsRef = useRef<WebSocket | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [symbolTestResults, setSymbolTestResults] = useState<Record<string, { ok: boolean; exchange?: string; last_price?: number; error?: string; note?: string } | "loading">>({});
+  const [symbolTestResults, setSymbolTestResults] = useState<Record<string, SymbolTestResult | "loading">>({});
+  const [symbolDebugResults, setSymbolDebugResults] = useState<Record<string, SymbolDebugResult | "loading">>({});
   const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
   const [accountInfo, setAccountInfo] = useState<{ ok: boolean; net_liquidation?: number; total_cash?: number; buying_power?: number; error?: string } | null>(null);
 
@@ -161,6 +202,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
           max_daily_loss: formMaxDailyLoss,
           max_total_exposure: formMaxTotalExposure,
           order_type: formOrderType,
+          market_data_mode: formMarketDataMode,
         }),
       });
       if (!res.ok) {
@@ -260,11 +302,25 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
         fetch(`${API_BASE}/api/live/sessions/${sessionId}`),
         fetch(`${API_BASE}/api/live/sessions/${sessionId}/trades`),
       ]);
+      let detailData: {
+        session: LiveSession;
+        symbols: LiveSessionSymbol[];
+        is_running: boolean;
+        total_pnl: number | null;
+        total_value: number | null;
+      } | null = null;
       let symbols: LiveSessionSymbol[] = [];
       if (detailRes.ok) {
-        const data = await detailRes.json();
-        setSessionDetail(data);
-        symbols = data.symbols ?? [];
+        const parsed = await detailRes.json() as {
+          session: LiveSession;
+          symbols: LiveSessionSymbol[];
+          is_running: boolean;
+          total_pnl: number | null;
+          total_value: number | null;
+        };
+        detailData = parsed;
+        setSessionDetail(parsed);
+        symbols = parsed.symbols ?? [];
       }
       if (tradesRes.ok) {
         const data = await tradesRes.json();
@@ -273,20 +329,27 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
 
       if (skipCandles) return;
 
-      // Fetch candles for each symbol: historical 1m candles + any live aggregator candles
+      // Fetch candles for each symbol.
+      // Realtime-only sessions must not hit the historical candles API.
+      const allowHistoricalBase = detailData?.session?.market_data_mode === "delayed";
       const candleMap: Record<string, MiniCandle[]> = {};
       await Promise.all(
         symbols.map(async (s) => {
           try {
-            // Fetch historical 1m candles
-            const [histRes, liveRes] = await Promise.all([
-              fetch(`${API_BASE}/api/candles?symbol=${s.symbol}&timeframe=1m&limit=120`),
+            const requests: Promise<Response>[] = [
               fetch(`${API_BASE}/api/live/sessions/${sessionId}/candles/${s.symbol}`),
-            ]);
+            ];
+            if (allowHistoricalBase) {
+              requests.unshift(fetch(`${API_BASE}/api/candles?symbol=${s.symbol}&timeframe=1m&limit=120`));
+            }
+            const responses = await Promise.all(requests);
+            const histRes = allowHistoricalBase ? responses[0] : null;
+            const liveRes = responses[allowHistoricalBase ? 1 : 0];
+
             const histCandles: MiniCandle[] = [];
-            if (histRes.ok) {
-              const data = await histRes.json();
-              for (const c of data.candles ?? []) {
+            if (histRes?.ok) {
+              const histData = await histRes.json();
+              for (const c of histData.candles ?? []) {
                 histCandles.push({
                   time: c.time,
                   open: c.open,
@@ -297,17 +360,17 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                 });
               }
             }
-            // Live aggregator candles (from session runtime)
+
             let liveCandles: MiniCandle[] = [];
             if (liveRes.ok) {
-              const data = await liveRes.json();
-              liveCandles = data.candles ?? [];
+              const liveData = await liveRes.json();
+              liveCandles = liveData.candles ?? [];
             }
-            // Merge: use historical as base, append any live candles with timestamps beyond the last historical
+
             const lastHistTime = histCandles.length > 0 ? histCandles[histCandles.length - 1].time : "";
             const merged = [...histCandles];
             for (const lc of liveCandles) {
-              if (lc.time > lastHistTime) {
+              if (!allowHistoricalBase || lc.time > lastHistTime) {
                 merged.push(lc);
               }
             }
@@ -506,7 +569,9 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
     const sym = symbol.trim().toUpperCase();
     setSymbolTestResults((prev) => ({ ...prev, [sym]: "loading" }));
     try {
-      const res = await fetch(`${API_BASE}/api/live/test-symbol/${encodeURIComponent(sym)}`);
+      const res = await fetch(
+        `${API_BASE}/api/live/test-symbol/${encodeURIComponent(sym)}?market_data_mode=${formMarketDataMode}`,
+      );
       if (res.ok) {
         const data = await res.json();
         setSymbolTestResults((prev) => ({ ...prev, [sym]: data }));
@@ -515,6 +580,43 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
       }
     } catch {
       setSymbolTestResults((prev) => ({ ...prev, [sym]: { ok: false, error: "Network error" } }));
+    }
+  }
+
+  async function debugMarketData(symbol: string) {
+    if (!symbol.trim()) return;
+    const sym = symbol.trim().toUpperCase();
+    setSymbolDebugResults((prev) => ({ ...prev, [sym]: "loading" }));
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/live/debug-market-data/${encodeURIComponent(sym)}?market_data_mode=${formMarketDataMode}`,
+      );
+      if (res.ok) {
+        const data = await res.json() as SymbolDebugResult;
+        setSymbolDebugResults((prev) => ({ ...prev, [sym]: data }));
+      } else {
+        setSymbolDebugResults((prev) => ({
+          ...prev,
+          [sym]: {
+            symbol: sym,
+            market_data_mode: formMarketDataMode,
+            contract: { ok: false, error: "API error" },
+            historical_1m: { ok: false, error: "Diagnostic failed" },
+            realtime_bars: { ok: false, error: "Diagnostic failed" },
+          },
+        }));
+      }
+    } catch {
+      setSymbolDebugResults((prev) => ({
+        ...prev,
+        [sym]: {
+          symbol: sym,
+          market_data_mode: formMarketDataMode,
+          contract: { ok: false, error: "Network error" },
+          historical_1m: { ok: false, error: "Diagnostic failed" },
+          realtime_bars: { ok: false, error: "Diagnostic failed" },
+        },
+      }));
     }
   }
 
@@ -607,6 +709,13 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
               </select>
             </label>
             <label>
+              Market Data
+              <select value={formMarketDataMode} onChange={(e) => setFormMarketDataMode(e.target.value as "realtime" | "delayed")}>
+                <option value="realtime">Real-time only</option>
+                <option value="delayed">Delayed only</option>
+              </select>
+            </label>
+            <label>
               Capital / Symbol
               <input type="number" min={100} value={formCapital} onChange={(e) => setFormCapital(Number(e.target.value))} style={{ width: 100 }} />
             </label>
@@ -630,6 +739,9 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
               Max Daily Loss
               <input type="number" min={0} value={formMaxDailyLoss} onChange={(e) => setFormMaxDailyLoss(Number(e.target.value))} style={{ width: 100 }} />
             </label>
+          </div>
+          <div style={{ fontSize: "0.75rem", color: "#707070", marginBottom: "0.75rem" }}>
+            Real-time only = no delayed fallback and no delayed historical warm-up requests. Delayed only = paper-only execution using delayed polling.
           </div>
 
           {/* Default strategy */}
@@ -690,6 +802,14 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                 >
                   {symbolTestResults[row.symbol.toUpperCase()] === "loading" ? "Testing…" : "Test"}
                 </button>
+                <button
+                  type="button"
+                  onClick={() => debugMarketData(row.symbol)}
+                  disabled={!row.symbol.trim() || symbolDebugResults[row.symbol.toUpperCase()] === "loading"}
+                  style={{ fontSize: "0.7rem", padding: "0.15rem 0.4rem" }}
+                >
+                  {symbolDebugResults[row.symbol.toUpperCase()] === "loading" ? "Debugging…" : "Debug"}
+                </button>
                 {(() => {
                   const r = symbolTestResults[row.symbol.toUpperCase()];
                   if (!r || r === "loading") return null;
@@ -702,6 +822,29 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                     );
                   }
                   return <span style={{ fontSize: "0.7rem", color: NEGATIVE_COLOR }}>✗ {r.error}</span>;
+                })()}
+                {(() => {
+                  const d = symbolDebugResults[row.symbol.toUpperCase()];
+                  if (!d || d === "loading") return null;
+                  const contractBits = d.contract?.ok
+                    ? `contract ✓ conId=${d.contract.conId} ${d.contract.exchange}/${d.contract.primaryExchange ?? "—"}`
+                    : `contract ✗ ${d.contract?.error ?? "error"}`;
+                  const histBits = d.historical_1m?.ok
+                    ? `hist ✓ reqId=${d.historical_1m.reqId ?? "—"} bars=${d.historical_1m.bars ?? 0} last=${d.historical_1m.last_time ?? "—"}`
+                    : `hist ✗ ${d.historical_1m?.error ?? "error"}`;
+                  const rtBits = d.realtime_bars?.ok
+                    ? `rt-bars ✓ reqId=${d.realtime_bars.reqId ?? "—"} received=${d.realtime_bars.received_bar ? "yes" : "no"} bars=${d.realtime_bars.bar_count ?? 0}`
+                    : `rt-bars ✗ ${d.realtime_bars?.error ?? "error"}`;
+                  return (
+                    <details style={{ flexBasis: "100%", fontSize: "0.68rem", color: "#444", margin: "0.1rem 0 0.2rem" }}>
+                      <summary style={{ cursor: "pointer" }}>
+                        Debug · {contractBits} · {histBits} · {rtBits}
+                      </summary>
+                      <pre style={{ margin: "0.35rem 0 0", padding: "0.4rem", background: "#f5f5f5", border: "1px solid #d0d0d0", whiteSpace: "pre-wrap" }}>
+                        {JSON.stringify(d, null, 2)}
+                      </pre>
+                    </details>
+                  );
                 })()}
                 {formSymbols.length > 1 && (
                   <button type="button" onClick={() => removeSymbolRow(idx)} style={{ fontSize: "0.7rem", padding: "0.1rem 0.3rem" }}>
@@ -733,7 +876,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                   <tr>
                     <th>Name</th>
                     <th>Status</th>
-                    <th>Order Type</th>
+                    <th>Order / Data</th>
                     <th>Created</th>
                     <th>Actions</th>
                   </tr>
@@ -759,7 +902,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                           {s.is_running ? "● running" : s.status}
                         </span>
                       </td>
-                      <td onClick={() => navigate(`/paper-trading/${s.id}`)}>{s.order_type}</td>
+                      <td onClick={() => navigate(`/paper-trading/${s.id}`)}>{s.order_type} · {s.market_data_mode}</td>
                       <td onClick={() => navigate(`/paper-trading/${s.id}`)}>
                         {s.created_at ? new Date(s.created_at).toLocaleString() : "—"}
                       </td>
@@ -828,6 +971,9 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                 {sessionDetail.is_running ? "● RUNNING" : sessionDetail.session.status.toUpperCase()}
               </span>
               {wsConnected && <span style={{ fontSize: "0.7rem", color: POSITIVE_COLOR }}>WS ●</span>}
+              <span style={{ fontSize: "0.75rem", color: "#707070" }}>
+                Data: {sessionDetail.session.market_data_mode === "realtime" ? "real-time only" : "delayed only"}
+              </span>
               {sessionDetail.session.started_at && (
                 <span style={{ fontSize: "0.75rem", color: "#707070" }}>
                   Started: {new Date(sessionDetail.session.started_at).toLocaleString()}
@@ -888,6 +1034,10 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
               <div>
                 <span>Order Type</span>
                 <strong>{sessionDetail.session.order_type}</strong>
+              </div>
+              <div>
+                <span>Market Data</span>
+                <strong>{sessionDetail.session.market_data_mode}</strong>
               </div>
               <div>
                 <span>Max Total Exposure</span>
