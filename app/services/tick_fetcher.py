@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections import defaultdict
 from datetime import UTC, date, datetime, time, timedelta
 
@@ -23,7 +24,7 @@ EXT_CLOSE_HOUR = 24  # midnight = end of day
 
 # IBKR limitations for 5-second bars
 MAX_DURATION_SECONDS = 1800  # 30 minutes per request
-REQUEST_DELAY_SECONDS = 2.0  # rate-limit spacing
+REQUEST_DELAY_SECONDS = max(0.0, float(os.environ.get("TICK_FETCH_REQUEST_DELAY_SECONDS", "2.0")))
 MAX_LOOKBACK_DAYS = 7
 DEFAULT_START_OFFSET_DAYS = 7
 
@@ -102,6 +103,38 @@ class TickFetcher:
         self._provider = provider or get_market_data_provider()
         self._repo = TickRepository()
 
+    def _hour_windows(self, hour_start: datetime) -> list[tuple[datetime, datetime]]:
+        """Return the 30-minute request windows needed for one trading hour."""
+        hour_end = hour_start + timedelta(hours=1)
+        fetch_end = min(hour_end, datetime.now(tz=UTC))
+        if fetch_end <= hour_start:
+            return []
+
+        windows: list[tuple[datetime, datetime]] = []
+        for offset_minutes in [0, 30]:
+            window_start = hour_start + timedelta(minutes=offset_minutes)
+            window_end = min(window_start + timedelta(minutes=30), fetch_end)
+            if window_end > window_start:
+                windows.append((window_start, window_end))
+        return windows
+
+    async def _store_chunk(self, symbol: str, hour_start: datetime, bars: list[Candle]) -> None:
+        if not bars:
+            return
+        bar_dicts = [
+            {
+                "t": bar.time.isoformat(),
+                "o": bar.open,
+                "h": bar.high,
+                "l": bar.low,
+                "c": bar.close,
+                "v": bar.volume,
+            }
+            for bar in bars
+        ]
+        async with get_db_context() as session:
+            await self._repo.upsert_chunk(session, symbol, hour_start, bar_dicts)
+
     def resolve_date_range(
         self,
         start_date: date | None,
@@ -179,22 +212,13 @@ class TickFetcher:
         )
 
         fetched = 0
+        pending_store: asyncio.Task | None = None
         for hour_start in missing_hours:
             bars = await self._fetch_hour(symbol, hour_start, use_rth=not extended)
-            if bars:
-                bar_dicts = [
-                    {
-                        "t": bar.time.isoformat(),
-                        "o": bar.open,
-                        "h": bar.high,
-                        "l": bar.low,
-                        "c": bar.close,
-                        "v": bar.volume,
-                    }
-                    for bar in bars
-                ]
-                async with get_db_context() as session:
-                    await self._repo.upsert_chunk(session, symbol, hour_start, bar_dicts)
+
+            if pending_store is not None:
+                await pending_store
+            pending_store = asyncio.create_task(self._store_chunk(symbol, hour_start, bars))
 
             fetched += 1
             if on_progress:
@@ -204,6 +228,9 @@ class TickFetcher:
                     "cached_chunks": cached,
                     "current": hour_start.isoformat(),
                 })
+
+        if pending_store is not None:
+            await pending_store
 
         return {
             "total_chunks": total,
@@ -219,18 +246,12 @@ class TickFetcher:
         for the hour to complete.
         """
         all_bars: list[Candle] = []
-
-        hour_end = hour_start + timedelta(hours=1)
-        fetch_end = min(hour_end, datetime.now(tz=UTC))
-        if fetch_end <= hour_start:
+        windows = self._hour_windows(hour_start)
+        if not windows:
             return []
 
-        for offset_minutes in [0, 30]:
-            window_start = hour_start + timedelta(minutes=offset_minutes)
-            window_end = min(window_start + timedelta(minutes=30), fetch_end)
-            if window_end <= window_start:
-                continue
-
+        fetch_end = windows[-1][1]
+        for idx, (window_start, window_end) in enumerate(windows):
             try:
                 bars = await asyncio.to_thread(
                     self._fetch_window, symbol, window_start, window_end, use_rth,
@@ -242,7 +263,8 @@ class TickFetcher:
             except Exception:
                 logger.exception("Failed to fetch %s window %s", symbol, window_start.isoformat())
 
-            await asyncio.sleep(REQUEST_DELAY_SECONDS)
+            if idx < len(windows) - 1 and REQUEST_DELAY_SECONDS > 0:
+                await asyncio.sleep(REQUEST_DELAY_SECONDS)
 
         return all_bars
 
