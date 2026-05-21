@@ -188,6 +188,7 @@ class LiveSession(Base):
         nullable=False,
         default="market",
     )
+    market_data_mode = Column(String(16), nullable=False, default="realtime", server_default="realtime")
     position_size = Column(Float, nullable=False, default=1000.0)
     max_entries = Column(Integer, nullable=False, default=5)
     max_daily_loss = Column(Float, nullable=False, default=500.0)

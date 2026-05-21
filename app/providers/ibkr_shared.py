@@ -26,6 +26,7 @@ _ib: IB | None = None
 _executor: ThreadPoolExecutor | None = None
 _executor_thread_id: int | None = None
 _connected = False
+_market_data_mode = "realtime"
 
 
 def _get_config() -> tuple[str, int, int]:
@@ -109,14 +110,31 @@ def ensure_connected() -> None:
         )
 
     ib.connect(host, port, clientId=client_id, readonly=False, timeout=10)
-    # Request delayed data (type 3) so accounts without real-time
-    # subscriptions still receive free 15-min delayed market data.
-    ib.reqMarketDataType(3)
     _connected = True
     logger.info(
         "IBKR shared connection established (client_id=%s, host=%s, port=%s)",
         client_id, host, port,
     )
+
+
+def set_market_data_mode(mode: str) -> None:
+    """Set IBKR market data mode for the shared connection.
+
+    Must be called from the IB executor thread (via run_on_ib_thread).
+    """
+    global _market_data_mode
+    ensure_connected()
+    normalized = mode.strip().lower()
+    if normalized not in {"realtime", "delayed"}:
+        raise ValueError(f"Unsupported market data mode: {mode}")
+    market_data_type = 1 if normalized == "realtime" else 3
+    get_ib().reqMarketDataType(market_data_type)
+    _market_data_mode = normalized
+    logger.info("IBKR market data mode set to %s (type=%s)", normalized, market_data_type)
+
+
+def get_market_data_mode() -> str:
+    return _market_data_mode
 
 
 def disconnect() -> None:
@@ -131,7 +149,7 @@ def disconnect() -> None:
 
 def shutdown() -> None:
     """Fully tear down the shared IB resources for process shutdown."""
-    global _ib, _executor, _executor_thread_id, _connected
+    global _ib, _executor, _executor_thread_id, _connected, _market_data_mode
 
     if _executor is not None:
         try:
@@ -148,4 +166,5 @@ def shutdown() -> None:
 
     _executor_thread_id = None
     _connected = False
+    _market_data_mode = "realtime"
     _ib = None

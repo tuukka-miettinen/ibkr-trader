@@ -146,19 +146,33 @@ class LiveTradingEngine:
 
                 symbol_runtimes[ss.symbol] = runtime
 
+        active_modes = {
+            state.get("market_data_mode", "realtime")
+            for sid, state in self._sessions.items()
+            if sid != session_id
+        }
+        if active_modes and live_session.market_data_mode not in active_modes:
+            active_mode = sorted(active_modes)[0]
+            raise RuntimeError(
+                "Cannot start a session with "
+                f"{live_session.market_data_mode} market data while another running session uses "
+                f"{active_mode}. Stop the other session first."
+            )
+
         # Connect IBKR trading client
         if self._client is None:
             self._client = IBKRTradingClient.from_env()
 
-        if not self._client.is_connected:
-            try:
+        try:
+            if not self._client.is_connected:
                 self._client.connect()
-            except Exception as exc:
-                async with get_db_context() as db:
-                    await self._repo.update_session_status(
-                        db, session_id, "error", error_message=str(exc)
-                    )
-                raise
+            self._client.set_market_data_mode(live_session.market_data_mode)
+        except Exception as exc:
+            async with get_db_context() as db:
+                await self._repo.update_session_status(
+                    db, session_id, "error", error_message=str(exc)
+                )
+            raise
 
         # Forward IBKR errors to the WebSocket so the UI can display them
         def _ibkr_error_handler(req_id: int, error_code: int, error_string: str) -> None:
@@ -168,9 +182,7 @@ class LiveTradingEngine:
             if error_code == 162:  # "no data" — market closed or no recent trades
                 logger.debug("IBKR no data (reqId=%d): %s", req_id, error_string)
                 return
-            if error_code == 300:  # "can't find EId" — follows after 420
-                return
-            if error_code == 420:  # "no real-time permissions" — handled by polling fallback
+            if error_code == 300:  # "can't find EId" — may follow a cancelled subscription
                 return
             logger.warning("IBKR error %d (reqId=%d): %s", error_code, req_id, error_string)
             if self._loop:
@@ -190,52 +202,83 @@ class LiveTradingEngine:
             "session_name": live_session.name,
             "symbols": symbol_runtimes,
             "order_type": live_session.order_type,
+            "market_data_mode": live_session.market_data_mode,
             "max_daily_loss": live_session.max_daily_loss,
             "max_total_exposure": live_session.max_total_exposure,
         }
 
-        # Subscribe to real-time bars for each symbol
+        # Subscribe to bars for each symbol
         for sym, runtime in symbol_runtimes.items():
-            # Pre-load historical candles so indicators (RSI, VWAP) have
-            # warm-up data from the start instead of waiting 30+ minutes.
-            for tf in CANDLE_TIMEFRAMES:
-                existing_seed = runtime.aggregator.completed_candles(tf)
-                if recovering and existing_seed:
-                    logger.info(
-                        "Recovered %d persisted %s candles for %s",
-                        len(existing_seed), tf, sym,
-                    )
-                    continue
-                try:
-                    historical = self._client.get_historical_candles(sym, tf, "1 D")
-                    if historical:
-                        runtime.aggregator.seed_candles(tf, historical)
-                        async with get_db_context() as db:
-                            await self._repo.replace_seed_candles(
-                                db,
-                                session_symbol_id=runtime.session_symbol_id,
-                                timeframe=tf,
-                                candles=historical,
-                            )
+            if live_session.market_data_mode == "delayed":
+                # Only delayed mode is allowed to hit historical data for warm-up.
+                for tf in CANDLE_TIMEFRAMES:
+                    existing_seed = runtime.aggregator.completed_candles(tf)
+                    if recovering and existing_seed:
                         logger.info(
-                            "Seeded %d %s candles for %s", len(historical), tf, sym,
+                            "Recovered %d persisted %s candles for %s",
+                            len(existing_seed), tf, sym,
                         )
-                except Exception:
-                    if existing_seed:
-                        logger.warning(
-                            "Could not refresh %s candles for %s — using %d persisted candles",
-                            tf, sym, len(existing_seed), exc_info=True,
+                        continue
+                    try:
+                        historical = self._client.get_historical_candles(
+                            sym,
+                            tf,
+                            "1 D",
+                            market_data_mode="delayed",
                         )
-                    else:
-                        logger.warning("Could not pre-load %s candles for %s", tf, sym, exc_info=True)
+                        if historical:
+                            runtime.aggregator.seed_candles(tf, historical)
+                            async with get_db_context() as db:
+                                await self._repo.replace_seed_candles(
+                                    db,
+                                    session_symbol_id=runtime.session_symbol_id,
+                                    timeframe=tf,
+                                    candles=historical,
+                                )
+                            logger.info(
+                                "Seeded %d %s candles for %s", len(historical), tf, sym,
+                            )
+                    except Exception:
+                        if existing_seed:
+                            logger.warning(
+                                "Could not refresh %s candles for %s — using %d persisted candles",
+                                tf, sym, len(existing_seed), exc_info=True,
+                            )
+                        else:
+                            logger.warning("Could not pre-load %s candles for %s", tf, sym, exc_info=True)
+            elif recovering:
+                existing_seed_count = sum(len(runtime.aggregator.completed_candles(tf)) for tf in CANDLE_TIMEFRAMES)
+                if existing_seed_count:
+                    logger.info(
+                        "Realtime mode recovery reusing %d persisted seed candles for %s",
+                        existing_seed_count,
+                        sym,
+                    )
 
-            self._client.subscribe_realtime_bars(
-                sym, lambda candle, _sid=session_id, _sym=sym: self._on_tick(_sid, _sym, candle)
-            )
-            # Check if the symbol fell back to polling (delayed data)
-            if self._client.is_polling_symbol(sym):
-                runtime.delayed = True
-                logger.info("Symbol %s is using delayed data (polling)", sym)
+            try:
+                runtime.delayed = self._client.subscribe_realtime_bars(
+                    sym,
+                    lambda candle, _sid=session_id, _sym=sym: self._on_tick(_sid, _sym, candle),
+                    market_data_mode=live_session.market_data_mode,
+                )
+            except Exception as exc:
+                for cleanup_sym in symbol_runtimes:
+                    try:
+                        self._client.unsubscribe_realtime_bars(cleanup_sym)
+                    except Exception:
+                        logger.exception("Error cleaning up %s after start failure", cleanup_sym)
+                async with get_db_context() as db:
+                    await self._repo.update_session_status(
+                        db,
+                        session_id,
+                        "error",
+                        error_message=str(exc),
+                    )
+                self._sessions.pop(session_id, None)
+                raise RuntimeError(str(exc)) from exc
+
+            if runtime.delayed:
+                logger.info("Symbol %s is using delayed data (historical polling)", sym)
 
         # Mark session as running
         async with get_db_context() as db:
@@ -245,10 +288,13 @@ class LiveTradingEngine:
         await self._broadcast(session_id, {
             "type": "status",
             "status": "running",
-            "message": f"Session started with {len(symbol_runtimes)} symbol(s)"
-                       + (f" ({len(delayed_syms)} using delayed data)" if delayed_syms else ""),
+            "message": (
+                f"Session started with {len(symbol_runtimes)} symbol(s) using {live_session.market_data_mode} market data"
+                + (f" ({len(delayed_syms)} using delayed data)" if delayed_syms else "")
+            ),
             "symbols": list(symbol_runtimes.keys()),
             "delayed_symbols": delayed_syms,
+            "market_data_mode": live_session.market_data_mode,
         })
 
         logger.info("Live session %s started with symbols: %s", session_id, list(symbol_runtimes.keys()))
@@ -333,6 +379,7 @@ class LiveTradingEngine:
         return {
             "session_id": session_id,
             "status": "running",
+            "market_data_mode": state.get("market_data_mode", "realtime"),
             "symbols": symbols,
             "total_pnl": round(total_pnl, 4),
             "total_value": round(total_value, 4),
