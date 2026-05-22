@@ -28,6 +28,55 @@ function fmtPct(v: number) {
 const POSITIVE_COLOR = "#15803d";
 const NEGATIVE_COLOR = "#b91c1c";
 const NEUTRAL_COLOR = "#5a5a5a";
+const STRATEGY_CADENCE_MS = 5000;
+
+function parseIsoTimeMs(value?: string | null) {
+  if (!value) return null;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+function fmtClock(value?: string | null) {
+  if (!value) return "—";
+  const ms = parseIsoTimeMs(value);
+  if (ms == null) return "—";
+  return new Date(ms).toLocaleTimeString();
+}
+
+function describeStrategyCycle(lastRunAt?: string | null, nowMs = Date.now()) {
+  const lastRunMs = parseIsoTimeMs(lastRunAt);
+  if (lastRunMs == null) {
+    return {
+      headline: "Awaiting first tick",
+      detail: "No price data received yet",
+      color: NEUTRAL_COLOR,
+    };
+  }
+
+  const elapsedMs = Math.max(0, nowMs - lastRunMs);
+  const remainingMs = STRATEGY_CADENCE_MS - elapsedMs;
+  if (remainingMs >= 0) {
+    return {
+      headline: `Next in ${Math.max(1, Math.ceil(remainingMs / 1000))}s`,
+      detail: `Last run ${fmtClock(lastRunAt)}`,
+      color: POSITIVE_COLOR,
+    };
+  }
+
+  if (elapsedMs < STRATEGY_CADENCE_MS * 6) {
+    return {
+      headline: "Waiting for next tick",
+      detail: `Last run ${fmtClock(lastRunAt)}`,
+      color: NEUTRAL_COLOR,
+    };
+  }
+
+  return {
+    headline: `No update for ${Math.ceil(elapsedMs / 1000)}s`,
+    detail: `Last run ${fmtClock(lastRunAt)}`,
+    color: NEGATIVE_COLOR,
+  };
+}
 
 type SymbolTestResult = {
   ok: boolean;
@@ -119,6 +168,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
   const [symbolDebugResults, setSymbolDebugResults] = useState<Record<string, SymbolDebugResult | "loading">>({});
   const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
   const [accountInfo, setAccountInfo] = useState<{ ok: boolean; net_liquidation?: number; total_cash?: number; buying_power?: number; error?: string } | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   // ── Load sessions + favorite algorithms on mount ──
   useEffect(() => {
@@ -423,6 +473,22 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
     };
   }, [expandedSymbol]);
 
+  // ── Session timer for 5-second strategy cadence ──
+  useEffect(() => {
+    if (!activeSessionId || !sessionDetail?.is_running) {
+      setNowMs(Date.now());
+      return;
+    }
+
+    const timerId = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(timerId);
+    };
+  }, [activeSessionId, sessionDetail?.is_running]);
+
   // ── WebSocket for live updates ──
   useEffect(() => {
     if (!activeSessionId || !sessionDetail?.is_running) {
@@ -451,8 +517,22 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
               ? {
                   ...prev,
                   symbols: prev.symbols.map((s) => {
-                    const live = evt.symbols[s.symbol];
-                    return live ? { ...s, ...live } : s;
+                    const live = evt.symbols[s.symbol] as (LiveSessionSymbol & {
+                      position_shares?: number;
+                      cash?: number;
+                      last_tick_time?: string | null;
+                      last_strategy_run_at?: string | null;
+                    }) | undefined;
+                    return live
+                      ? {
+                          ...s,
+                          ...live,
+                          current_shares: live.current_shares ?? live.position_shares ?? s.current_shares,
+                          cash_remaining: live.cash_remaining ?? live.cash ?? s.cash_remaining,
+                          last_tick_time: live.last_tick_time ?? s.last_tick_time ?? null,
+                          last_strategy_run_at: live.last_strategy_run_at ?? s.last_strategy_run_at ?? null,
+                        }
+                      : s;
                   }),
                   total_pnl: evt.total_pnl,
                   total_value: evt.total_value,
@@ -463,6 +543,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
         }
 
         if (evt.type === "tick") {
+          const receivedAt = new Date().toISOString();
           // Update stats
           setSessionDetail((prev) => {
             if (!prev) return prev;
@@ -479,6 +560,8 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                       portfolio_value: evt.portfolio_value,
                       current_shares: evt.position_shares,
                       tick_count: evt.tick_count,
+                      last_tick_time: evt.time,
+                      last_strategy_run_at: receivedAt,
                     }
                   : s,
               ),
@@ -619,6 +702,18 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
       }));
     }
   }
+
+  const sortedSessionSymbols = sessionDetail
+    ? [...sessionDetail.symbols].sort((a, b) => a.symbol.localeCompare(b.symbol))
+    : [];
+  const sessionLastRunTime = sortedSessionSymbols.reduce<string | null>((latest, symbol) => {
+    const latestMs = parseIsoTimeMs(latest);
+    const candidateValue = symbol.last_strategy_run_at ?? symbol.last_tick_time;
+    const candidateMs = parseIsoTimeMs(candidateValue);
+    if (candidateMs == null) return latest;
+    return latestMs == null || candidateMs > latestMs ? candidateValue ?? latest : latest;
+  }, null);
+  const sessionCycle = describeStrategyCycle(sessionLastRunTime, nowMs);
 
   // ── Render ──
   return (
@@ -1014,6 +1109,38 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
             </div>
           </div>
 
+          <div
+            style={{
+              display: "flex",
+              gap: "1rem",
+              alignItems: "center",
+              flexWrap: "wrap",
+              padding: "0.45rem 0.75rem",
+              background: "#fafafa",
+              border: "1px solid #000000",
+              marginBottom: "0.75rem",
+              fontSize: "0.8rem",
+            }}
+          >
+            <span style={{ fontWeight: 700, color: "#5a5a5a", fontSize: "0.7rem" }}>5S STRATEGY TIMER</span>
+            <span>
+              <span style={{ color: "#707070" }}>Cycle: </span>
+              <strong style={{ color: sessionDetail.is_running ? sessionCycle.color : NEUTRAL_COLOR }}>
+                {sessionDetail.is_running ? sessionCycle.headline : "Stopped"}
+              </strong>
+            </span>
+            <span style={{ color: "#707070" }}>
+              {sessionDetail.is_running
+                ? sessionCycle.detail
+                : sessionLastRunTime
+                  ? `Last run ${fmtClock(sessionLastRunTime)}`
+                  : "No live ticks yet"}
+            </span>
+            <span style={{ color: "#707070" }}>
+              New price data triggers strategy execution every 5 seconds.
+            </span>
+          </div>
+
           {sessionDetail.session.error_message && (
             <p className="error-banner" style={{ marginBottom: "0.5rem" }}>{sessionDetail.session.error_message}</p>
           )}
@@ -1065,10 +1192,11 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                   <th style={{ textAlign: "right" }}>Portfolio</th>
                   <th style={{ textAlign: "center" }}>B/S/T</th>
                   <th style={{ textAlign: "center" }}>Daily</th>
+                  <th style={{ textAlign: "center" }}>5s Timer</th>
                 </tr>
               </thead>
               <tbody>
-                {[...sessionDetail.symbols].sort((a, b) => a.symbol.localeCompare(b.symbol)).map((s) => {
+                {sortedSessionSymbols.map((s) => {
                   const unrealized = s.unrealized_pnl ?? 0;
                   const realized = s.realized_pnl ?? 0;
                   const hasPosition = (s.current_shares ?? 0) > 0;
@@ -1077,6 +1205,7 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                   const symTrades = trades.filter((t) => t.symbol === s.symbol);
                   const buys = symTrades.filter((t) => t.side === "buy").length;
                   const sells = symTrades.filter((t) => t.side === "sell").length;
+                  const symbolCycle = describeStrategyCycle(s.last_strategy_run_at ?? s.last_tick_time, nowMs);
                   return (
                     <tr key={s.id} style={{ cursor: "pointer" }} onClick={() => setExpandedSymbol(isExpanded ? null : s.symbol)}>
                       <td style={{ fontWeight: 700 }}>
@@ -1130,6 +1259,18 @@ export default function LiveTradingView({ initialSessionId }: { initialSessionId
                       <td style={{ textAlign: "center", fontSize: "0.85rem" }}>
                         <span style={{ fontWeight: 600 }}>{s.daily_entry_count ?? 0}</span>
                         <span style={{ color: "#707070" }}>/{s.max_daily_entries ?? "∞"}</span>
+                      </td>
+                      <td style={{ textAlign: "center", minWidth: 170 }}>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem", alignItems: "center" }}>
+                          <strong style={{ color: sessionDetail.is_running ? symbolCycle.color : NEUTRAL_COLOR, fontSize: "0.8rem" }}>
+                            {sessionDetail.is_running ? symbolCycle.headline : "Stopped"}
+                          </strong>
+                          <span style={{ fontSize: "0.68rem", color: "#707070" }}>
+                            {s.last_strategy_run_at || s.last_tick_time
+                              ? `Tick ${s.tick_count ?? 0} · data ${fmtClock(s.last_tick_time)} · ran ${fmtClock(s.last_strategy_run_at ?? s.last_tick_time)}`
+                              : "Awaiting first price update"}
+                          </span>
+                        </div>
                       </td>
                     </tr>
                   );

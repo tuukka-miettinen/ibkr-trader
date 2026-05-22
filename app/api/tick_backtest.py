@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from collections import defaultdict
 from datetime import date, timedelta
@@ -18,6 +19,8 @@ from app.services.backtest import summarize_daily_snapshots, summarize_result
 from app.services.tick_fetcher import tick_fetcher
 from app.strategy.sandbox import compile_tick_script, validate_tick_script
 from app.strategy.tick_backtest import TickBacktestConfig, run_tick_backtest
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/tick-backtest", tags=["tick-backtest"])
 strategy_repo = StrategyRepository()
@@ -156,304 +159,318 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
         def _sse(data: dict) -> str:
             return f"data: {json.dumps(data)}\n\n"
 
-        # Stage 1: Fetch data
-        yield _sse({"stage": "fetch", "message": "Fetching data..."})
+        try:
+            # Stage 1: Fetch data
+            yield _sse({"stage": "fetch", "message": "Fetching data..."})
 
-        fetch_progress_queue: asyncio.Queue = asyncio.Queue()
+            fetch_progress_queue: asyncio.Queue = asyncio.Queue()
 
-        def fetch_progress(p: dict):
-            fetch_progress_queue.put_nowait(p)
+            def fetch_progress(p: dict):
+                fetch_progress_queue.put_nowait(p)
 
-        fetch_task = asyncio.create_task(
-            tick_fetcher.fetch_and_store(
-                sym,
-                start_date=body.start_date,
-                end_date=body.end_date,
-                extended=body.extended,
-                on_progress=fetch_progress,
+            fetch_task = asyncio.create_task(
+                tick_fetcher.fetch_and_store(
+                    sym,
+                    start_date=body.start_date,
+                    end_date=body.end_date,
+                    extended=body.extended,
+                    on_progress=fetch_progress,
+                )
             )
-        )
 
-        while not fetch_task.done():
-            try:
-                p = await asyncio.wait_for(fetch_progress_queue.get(), timeout=0.1)
+            while not fetch_task.done():
+                try:
+                    p = await asyncio.wait_for(fetch_progress_queue.get(), timeout=0.1)
+                    total = p.get("total_chunks", 0)
+                    cached = p.get("cached_chunks", 0)
+                    fetched = p.get("fetched_chunks", 0)
+                    remaining = max(total - cached - fetched, 0)
+                    current = p.get("current")
+                    if total > 0 and cached == total:
+                        message = f"All {total} chunks cached"
+                    elif fetched == 0:
+                        message = f"Fetching data... {cached}/{total} chunks already cached"
+                    else:
+                        message = (
+                            f"Fetching data... {fetched} fetched, {cached} cached, "
+                            f"{remaining} remaining"
+                        )
+                    payload = {
+                        "stage": "fetch",
+                        "message": message,
+                        "total_chunks": total,
+                        "cached_chunks": cached,
+                        "fetched_chunks": fetched,
+                        "remaining_chunks": remaining,
+                    }
+                    if current:
+                        payload["current"] = current
+                    yield _sse(payload)
+                except asyncio.TimeoutError:
+                    continue
+
+            fetch_result = await fetch_task
+            while not fetch_progress_queue.empty():
+                p = fetch_progress_queue.get_nowait()
                 total = p.get("total_chunks", 0)
                 cached = p.get("cached_chunks", 0)
                 fetched = p.get("fetched_chunks", 0)
                 remaining = max(total - cached - fetched, 0)
-                current = p.get("current")
-                if total > 0 and cached == total:
-                    message = f"All {total} chunks cached"
-                elif fetched == 0:
-                    message = f"Fetching data... {cached}/{total} chunks already cached"
-                else:
-                    message = (
-                        f"Fetching data... {fetched} fetched, {cached} cached, "
-                        f"{remaining} remaining"
-                    )
                 payload = {
                     "stage": "fetch",
-                    "message": message,
+                    "message": (
+                        f"All {total} chunks cached"
+                        if total > 0 and cached == total
+                        else f"Fetching data... {fetched} fetched, {cached} cached, {remaining} remaining"
+                    ),
                     "total_chunks": total,
                     "cached_chunks": cached,
                     "fetched_chunks": fetched,
                     "remaining_chunks": remaining,
                 }
-                if current:
-                    payload["current"] = current
+                if p.get("current"):
+                    payload["current"] = p["current"]
                 yield _sse(payload)
-            except asyncio.TimeoutError:
-                continue
 
-        fetch_result = await fetch_task
-        while not fetch_progress_queue.empty():
-            p = fetch_progress_queue.get_nowait()
-            total = p.get("total_chunks", 0)
-            cached = p.get("cached_chunks", 0)
-            fetched = p.get("fetched_chunks", 0)
-            remaining = max(total - cached - fetched, 0)
-            payload = {
-                "stage": "fetch",
-                "message": (
-                    f"All {total} chunks cached"
-                    if total > 0 and cached == total
-                    else f"Fetching data... {fetched} fetched, {cached} cached, {remaining} remaining"
-                ),
-                "total_chunks": total,
-                "cached_chunks": cached,
-                "fetched_chunks": fetched,
-                "remaining_chunks": remaining,
-            }
-            if p.get("current"):
-                payload["current"] = p["current"]
-            yield _sse(payload)
+            cached = fetch_result["cached_chunks"]
+            fetched = fetch_result["fetched_chunks"]
+            total = fetch_result["total_chunks"]
+            if fetched > 0:
+                yield _sse({
+                    "stage": "fetch",
+                    "message": f"Fetched {fetched} new chunks ({cached} cached, {total} total)",
+                    "total_chunks": total,
+                    "cached_chunks": cached,
+                    "fetched_chunks": fetched,
+                    "remaining_chunks": 0,
+                })
+            else:
+                yield _sse({
+                    "stage": "fetch",
+                    "message": f"All {total} chunks cached",
+                    "total_chunks": total,
+                    "cached_chunks": cached,
+                    "fetched_chunks": 0,
+                    "remaining_chunks": 0,
+                })
 
-        cached = fetch_result["cached_chunks"]
-        fetched = fetch_result["fetched_chunks"]
-        total = fetch_result["total_chunks"]
-        if fetched > 0:
-            yield _sse({
-                "stage": "fetch",
-                "message": f"Fetched {fetched} new chunks ({cached} cached, {total} total)",
-                "total_chunks": total,
-                "cached_chunks": cached,
-                "fetched_chunks": fetched,
-                "remaining_chunks": 0,
-            })
-        else:
-            yield _sse({
-                "stage": "fetch",
-                "message": f"All {total} chunks cached",
-                "total_chunks": total,
-                "cached_chunks": cached,
-                "fetched_chunks": 0,
-                "remaining_chunks": 0,
-            })
+            # Stage 2: Load ticks
+            yield _sse({"stage": "load", "message": "Loading ticks..."})
+            ticks = await tick_fetcher.load_ticks(
+                sym,
+                start_date=body.start_date,
+                end_date=body.end_date,
+                extended=body.extended,
+            )
+            if not ticks:
+                yield _sse({"stage": "error", "message": f"No tick data available for {sym}"})
+                return
 
-        # Stage 2: Load ticks
-        yield _sse({"stage": "load", "message": "Loading ticks..."})
-        ticks = await tick_fetcher.load_ticks(
-            sym,
-            start_date=body.start_date,
-            end_date=body.end_date,
-            extended=body.extended,
-        )
-        if not ticks:
-            yield _sse({"stage": "error", "message": f"No tick data available for {sym}"})
-            return
+            yield _sse({"stage": "load", "message": f"Loaded {len(ticks):,} ticks"})
 
-        yield _sse({"stage": "load", "message": f"Loaded {len(ticks):,} ticks"})
+            # Stage 3: Run backtest
+            yield _sse({"stage": "backtest", "message": "Running backtest...", "total_days": 0})
 
-        # Stage 3: Run backtest
-        yield _sse({"stage": "backtest", "message": "Running backtest...", "total_days": 0})
+            progress_queue: asyncio.Queue = asyncio.Queue()
 
-        progress_queue: asyncio.Queue = asyncio.Queue()
+            def backtest_progress(p: dict):
+                progress_queue.put_nowait(p)
 
-        def backtest_progress(p: dict):
-            progress_queue.put_nowait(p)
+            config = TickBacktestConfig(
+                starting_capital=body.starting_capital,
+                position_size=body.position_size,
+                max_entries=body.max_entries,
+                candle_timeframes=body.candle_timeframes,
+                fee_per_share=body.fee_per_share,
+                fee_min_order=body.fee_min_order,
+                fee_max_pct=body.fee_max_pct,
+            )
 
-        config = TickBacktestConfig(
-            starting_capital=body.starting_capital,
-            position_size=body.position_size,
-            max_entries=body.max_entries,
-            candle_timeframes=body.candle_timeframes,
-            fee_per_share=body.fee_per_share,
-            fee_min_order=body.fee_min_order,
-            fee_max_pct=body.fee_max_pct,
-        )
+            # Run backtest in thread, poll queue for progress
+            loop = asyncio.get_event_loop()
+            task = loop.run_in_executor(
+                None, lambda: run_tick_backtest(ticks, on_tick_fn, config, on_progress=backtest_progress)
+            )
 
-        # Run backtest in thread, poll queue for progress
-        loop = asyncio.get_event_loop()
-        task = loop.run_in_executor(
-            None, lambda: run_tick_backtest(ticks, on_tick_fn, config, on_progress=backtest_progress)
-        )
+            while not task.done():
+                try:
+                    p = await asyncio.wait_for(progress_queue.get(), timeout=0.1)
+                    yield _sse({
+                        "stage": "backtest",
+                        "message": f"Processing day {p['completed_days']}/{p['total_days']}",
+                    })
+                except asyncio.TimeoutError:
+                    continue
 
-        while not task.done():
-            try:
-                p = await asyncio.wait_for(progress_queue.get(), timeout=0.1)
+            result = await task
+
+            # Drain remaining progress events
+            while not progress_queue.empty():
+                p = progress_queue.get_nowait()
                 yield _sse({
                     "stage": "backtest",
                     "message": f"Processing day {p['completed_days']}/{p['total_days']}",
                 })
-            except asyncio.TimeoutError:
-                continue
 
-        result = await task
+            yield _sse({"stage": "backtest", "message": f"Backtest complete — {len(ticks):,} ticks processed"})
 
-        # Drain remaining progress events
-        while not progress_queue.empty():
-            p = progress_queue.get_nowait()
+            # Stage 4: Save results
+            yield _sse({"stage": "save", "message": "Saving results..."})
+            algo_name = _extract_strategy_name(body.script)
+            async with get_db_context() as session:
+                algo = await strategy_repo.save_algorithm(
+                    session, algo_name, body.script, body.description,
+                )
+                result_data = {
+                    "summary": summarize_result(result),
+                    "daily": summarize_daily_snapshots(result),
+                }
+                run = await strategy_repo.save_run(
+                    session,
+                    algorithm_id=algo.id,
+                    symbol=sym,
+                    config={
+                        "starting_capital": body.starting_capital,
+                        "position_size": body.position_size,
+                        "max_entries": body.max_entries,
+                        "start_date": body.start_date.isoformat() if body.start_date else None,
+                        "end_date": body.end_date.isoformat() if body.end_date else None,
+                        "resolved_start_date": resolved_start_date.isoformat(),
+                        "resolved_end_date": resolved_end_date.isoformat(),
+                        "candle_timeframes": [tf.value for tf in body.candle_timeframes],
+                    },
+                    result_data=result_data,
+                    mode="tick",
+                    lookback_days=len(trading_dates),
+                )
+
+            # Build 1-minute OHLCV candles with VWAP per trading day
+            def _trading_date_str(candle) -> str:
+                d = candle.time.date()
+                if candle.time.hour < 8:
+                    d = d - timedelta(days=1)
+                return d.isoformat()
+
+            candles_by_day: dict[str, list] = defaultdict(list)
+            vwap_state: dict[str, dict] = {}  # cum_vp, cum_vol per day
+            tick_idx_by_day: dict[str, int] = defaultdict(int)
+
+            # Group ticks into 1-minute bars
+            bar_state: dict[str, dict] = {}  # day → current bar accumulator
+
+            for t in ticks:
+                day = _trading_date_str(t)
+                tick_idx_by_day[day] += 1
+
+                # VWAP accumulator
+                tp = (t.high + t.low + t.close) / 3.0
+                st = vwap_state.setdefault(day, {"cum_vp": 0.0, "cum_vol": 0})
+                st["cum_vp"] += tp * t.volume
+                st["cum_vol"] += t.volume
+
+                # Truncate tick time to the minute for bar grouping
+                bar_minute = t.time.replace(second=0, microsecond=0)
+                bar_key = bar_minute.isoformat()
+
+                cur = bar_state.get(day)
+                if cur is None or cur["key"] != bar_key:
+                    # Close the previous bar (if any)
+                    if cur is not None:
+                        vwap_at_close = cur["cum_vp"] / cur["cum_vol"] if cur["cum_vol"] > 0 else cur["c"]
+                        candles_by_day[day].append({
+                            "t": cur["key"],
+                            "o": round(cur["o"], 4),
+                            "h": round(cur["h"], 4),
+                            "l": round(cur["l"], 4),
+                            "c": round(cur["c"], 4),
+                            "v": round(vwap_at_close, 4),
+                        })
+                    # Start a new bar
+                    bar_state[day] = {
+                        "key": bar_key,
+                        "o": t.open,
+                        "h": t.high,
+                        "l": t.low,
+                        "c": t.close,
+                        "cum_vp": st["cum_vp"],
+                        "cum_vol": st["cum_vol"],
+                    }
+                else:
+                    cur["h"] = max(cur["h"], t.high)
+                    cur["l"] = min(cur["l"], t.low)
+                    cur["c"] = t.close
+                    cur["cum_vp"] = st["cum_vp"]
+                    cur["cum_vol"] = st["cum_vol"]
+
+            # Flush the last open bar for each day
+            for day, cur in bar_state.items():
+                vwap_at_close = cur["cum_vp"] / cur["cum_vol"] if cur["cum_vol"] > 0 else cur["c"]
+                candles_by_day[day].append({
+                    "t": cur["key"],
+                    "o": round(cur["o"], 4),
+                    "h": round(cur["h"], 4),
+                    "l": round(cur["l"], 4),
+                    "c": round(cur["c"], 4),
+                    "v": round(vwap_at_close, 4),
+                })
+
+            # Tick counts per day so the frontend can flag partial days
+            ticks_per_day = dict(tick_idx_by_day)
+
+            # Serialize trades
+            trades_data = []
+            for trade in result.trades:
+                trades_data.append({
+                    "entry_time": trade.entry_time,
+                    "exit_time": trade.exit_time,
+                    "entry_price": trade.entry_price,
+                    "exit_price": trade.exit_price,
+                    "dollar_pnl": trade.dollar_pnl,
+                    "pnl_pct": trade.pnl_pct,
+                    "shares": trade.shares,
+                    "entries": trade.entries,
+                })
+
+            # Open position entries (buys with no corresponding sell yet)
+            open_entries_data = result.open_entries
+
+            # Final result event
             yield _sse({
-                "stage": "backtest",
-                "message": f"Processing day {p['completed_days']}/{p['total_days']}",
-            })
-
-        yield _sse({"stage": "backtest", "message": f"Backtest complete — {len(ticks):,} ticks processed"})
-
-        # Stage 4: Save results
-        yield _sse({"stage": "save", "message": "Saving results..."})
-        algo_name = _extract_strategy_name(body.script)
-        async with get_db_context() as session:
-            algo = await strategy_repo.save_algorithm(
-                session, algo_name, body.script, body.description,
-            )
-            result_data = {
-                "summary": summarize_result(result),
-                "daily": summarize_daily_snapshots(result),
-            }
-            run = await strategy_repo.save_run(
-                session,
-                algorithm_id=algo.id,
-                symbol=sym,
-                config={
-                    "starting_capital": body.starting_capital,
-                    "position_size": body.position_size,
-                    "max_entries": body.max_entries,
-                    "start_date": body.start_date.isoformat() if body.start_date else None,
-                    "end_date": body.end_date.isoformat() if body.end_date else None,
+                "stage": "done",
+                "result": {
+                    "algorithm": {
+                        "id": algo.id,
+                        "name": algo.name,
+                        "version": algo.version,
+                        "is_favorite": algo.is_favorite,
+                    },
+                    "run": {"id": run.id},
+                    "tick_count": len(ticks),
                     "resolved_start_date": resolved_start_date.isoformat(),
                     "resolved_end_date": resolved_end_date.isoformat(),
-                    "candle_timeframes": [tf.value for tf in body.candle_timeframes],
+                    "trading_day_count": len(trading_dates),
+                    "trades": trades_data,
+                    "open_entries": open_entries_data,
+                    "price_series": dict(candles_by_day),
+                    "ticks_per_day": ticks_per_day,
+                    **result_data,
                 },
-                result_data=result_data,
-                mode="tick",
-                lookback_days=len(trading_dates),
-            )
-
-        # Build 1-minute OHLCV candles with VWAP per trading day
-        def _trading_date_str(candle) -> str:
-            d = candle.time.date()
-            if candle.time.hour < 8:
-                d = d - timedelta(days=1)
-            return d.isoformat()
-
-        candles_by_day: dict[str, list] = defaultdict(list)
-        vwap_state: dict[str, dict] = {}  # cum_vp, cum_vol per day
-        tick_idx_by_day: dict[str, int] = defaultdict(int)
-
-        # Group ticks into 1-minute bars
-        bar_state: dict[str, dict] = {}  # day → current bar accumulator
-
-        for t in ticks:
-            day = _trading_date_str(t)
-            tick_idx_by_day[day] += 1
-
-            # VWAP accumulator
-            tp = (t.high + t.low + t.close) / 3.0
-            st = vwap_state.setdefault(day, {"cum_vp": 0.0, "cum_vol": 0})
-            st["cum_vp"] += tp * t.volume
-            st["cum_vol"] += t.volume
-
-            # Truncate tick time to the minute for bar grouping
-            bar_minute = t.time.replace(second=0, microsecond=0)
-            bar_key = bar_minute.isoformat()
-
-            cur = bar_state.get(day)
-            if cur is None or cur["key"] != bar_key:
-                # Close the previous bar (if any)
-                if cur is not None:
-                    vwap_at_close = cur["cum_vp"] / cur["cum_vol"] if cur["cum_vol"] > 0 else cur["c"]
-                    candles_by_day[day].append({
-                        "t": cur["key"],
-                        "o": round(cur["o"], 4),
-                        "h": round(cur["h"], 4),
-                        "l": round(cur["l"], 4),
-                        "c": round(cur["c"], 4),
-                        "v": round(vwap_at_close, 4),
-                    })
-                # Start a new bar
-                bar_state[day] = {
-                    "key": bar_key,
-                    "o": t.open,
-                    "h": t.high,
-                    "l": t.low,
-                    "c": t.close,
-                    "cum_vp": st["cum_vp"],
-                    "cum_vol": st["cum_vol"],
-                }
-            else:
-                cur["h"] = max(cur["h"], t.high)
-                cur["l"] = min(cur["l"], t.low)
-                cur["c"] = t.close
-                cur["cum_vp"] = st["cum_vp"]
-                cur["cum_vol"] = st["cum_vol"]
-
-        # Flush the last open bar for each day
-        for day, cur in bar_state.items():
-            vwap_at_close = cur["cum_vp"] / cur["cum_vol"] if cur["cum_vol"] > 0 else cur["c"]
-            candles_by_day[day].append({
-                "t": cur["key"],
-                "o": round(cur["o"], 4),
-                "h": round(cur["h"], 4),
-                "l": round(cur["l"], 4),
-                "c": round(cur["c"], 4),
-                "v": round(vwap_at_close, 4),
             })
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Tick backtest stream failed for %s", sym)
+            message = str(exc).strip() or "Tick backtest failed"
+            yield _sse({"stage": "error", "message": message})
 
-        # Tick counts per day so the frontend can flag partial days
-        ticks_per_day = dict(tick_idx_by_day)
-
-        # Serialize trades
-        trades_data = []
-        for trade in result.trades:
-            trades_data.append({
-                "entry_time": trade.entry_time,
-                "exit_time": trade.exit_time,
-                "entry_price": trade.entry_price,
-                "exit_price": trade.exit_price,
-                "dollar_pnl": trade.dollar_pnl,
-                "pnl_pct": trade.pnl_pct,
-                "shares": trade.shares,
-                "entries": trade.entries,
-            })
-
-        # Open position entries (buys with no corresponding sell yet)
-        open_entries_data = result.open_entries
-
-        # Final result event
-        yield _sse({
-            "stage": "done",
-            "result": {
-                "algorithm": {
-                    "id": algo.id,
-                    "name": algo.name,
-                    "version": algo.version,
-                    "is_favorite": algo.is_favorite,
-                },
-                "run": {"id": run.id},
-                "tick_count": len(ticks),
-                "resolved_start_date": resolved_start_date.isoformat(),
-                "resolved_end_date": resolved_end_date.isoformat(),
-                "trading_day_count": len(trading_dates),
-                "trades": trades_data,
-                "open_entries": open_entries_data,
-                "price_series": dict(candles_by_day),
-                "ticks_per_day": ticks_per_day,
-                **result_data,
-            },
-        })
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/algorithms")

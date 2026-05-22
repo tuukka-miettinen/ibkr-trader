@@ -50,6 +50,7 @@ class SymbolRuntime:
     last_price: float = 0.0
     tick_count: int = 0
     last_tick_time: datetime | None = None
+    last_strategy_run_at: datetime | None = None
     delayed: bool = False
     captured_ticks: list[Candle] = field(default_factory=list)
 
@@ -373,6 +374,7 @@ class LiveTradingEngine:
                 "portfolio_value": round(portfolio_value, 4),
                 "tick_count": rt.tick_count,
                 "last_tick_time": rt.last_tick_time.isoformat() if rt.last_tick_time else None,
+                "last_strategy_run_at": rt.last_strategy_run_at.isoformat() if rt.last_strategy_run_at else None,
                 "position_entries": rt.position_entries,
                 "delayed": rt.delayed,
             }
@@ -574,9 +576,12 @@ class LiveTradingEngine:
         )
 
         # Call strategy
+        strategy_run_at = datetime.now(UTC)
         try:
             result = rt.on_tick_fn(tick_state)
+            rt.last_strategy_run_at = strategy_run_at
         except Exception:
+            rt.last_strategy_run_at = strategy_run_at
             logger.exception("Strategy error for %s in session %s", symbol, session_id)
             result = None
 
@@ -607,8 +612,9 @@ class LiveTradingEngine:
             "realized_pnl": round(rt.realized_pnl, 4),
             "cash": round(rt.cash, 4),
             "portfolio_value": round(rt.cash + market_value, 4),
-                "tick_count": rt.tick_count,
-            })
+            "tick_count": rt.tick_count,
+            "strategy_run_at": rt.last_strategy_run_at.isoformat() if rt.last_strategy_run_at else None,
+        })
 
         # Persist every 60 ticks (≈ 5 minutes) to avoid excessive DB writes
         if rt.tick_count % 60 == 0:

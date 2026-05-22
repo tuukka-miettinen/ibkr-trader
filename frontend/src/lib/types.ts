@@ -199,6 +199,7 @@ export type LiveSessionSymbol = {
   avg_price?: number;
   tick_count?: number;
   last_tick_time?: string | null;
+  last_strategy_run_at?: string | null;
   delayed?: boolean;
   position_entries?: { time: string; price: number; shares: number; cost: number }[];
 };
@@ -220,7 +221,7 @@ export type LiveTrade = {
 
 export type LiveWsEvent =
   | { type: "snapshot"; session_id: string; market_data_mode?: "realtime" | "delayed"; symbols: Record<string, LiveSessionSymbol>; total_pnl: number; total_value: number }
-  | { type: "tick"; symbol: string; time: string; open: number; high: number; low: number; close: number; price: number; volume: number; position_shares: number; unrealized_pnl: number; realized_pnl: number; cash: number; portfolio_value: number; tick_count: number }
+  | { type: "tick"; symbol: string; time: string; open: number; high: number; low: number; close: number; price: number; volume: number; position_shares: number; unrealized_pnl: number; realized_pnl: number; cash: number; portfolio_value: number; tick_count: number; strategy_run_at?: string | null }
   | { type: "candle"; symbol: string; candle: { time: string; open: number; high: number; low: number; close: number; volume: number } }
   | { type: "trade"; symbol: string; side: "buy" | "sell"; shares: number; price: number; cost?: number; proceeds?: number; pnl?: number; pnl_pct?: number; time: string; cash_remaining: number }
   | { type: "status"; status: string; message: string; symbols?: string[]; delayed_symbols?: string[]; market_data_mode?: "realtime" | "delayed" }
