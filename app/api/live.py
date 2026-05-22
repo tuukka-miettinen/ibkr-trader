@@ -206,12 +206,12 @@ async def get_account_info() -> dict:
         live_engine._client = client  # noqa: SLF001
     try:
         if not client.is_connected:
-            client.connect()
+            await asyncio.to_thread(client.connect)
     except Exception as exc:
         return {"ok": False, "error": f"Cannot connect to IBKR: {exc}"}
 
     try:
-        summary = client.get_account_summary()
+        summary = await asyncio.to_thread(client.get_account_summary)
         return {
             "ok": True,
             "net_liquidation": summary.get("NetLiquidation"),

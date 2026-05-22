@@ -29,6 +29,17 @@ type DataStatus = {
   range: { start: string | null; end: string | null };
 };
 
+type RunProgressState = {
+  stage: string;
+  message: string;
+  total_chunks?: number;
+  cached_chunks?: number;
+  fetched_chunks?: number;
+  remaining_chunks?: number;
+  current?: string;
+  started_at_ms?: number;
+};
+
 const DEFAULT_TICK_SCRIPT = `STRATEGY_NAME = "unnamed"
 
 # Tick-level strategy: called once for every 5-second bar.
@@ -90,6 +101,14 @@ function dateInputValue(input: Date) {
   return `${year}-${month}-${day}`;
 }
 
+function formatDuration(seconds: number) {
+  const total = Math.max(0, Math.round(seconds));
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  if (mins <= 0) return `${secs}s`;
+  return `${mins}m ${secs}s`;
+}
+
 function todayInputValue() {
   return dateInputValue(new Date());
 }
@@ -134,7 +153,7 @@ export default function TickBacktestView() {
 
   const [runLoading, setRunLoading] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
-  const [runProgress, setRunProgress] = useState<string | null>(null);
+  const [runProgress, setRunProgress] = useState<RunProgressState | null>(null);
   const [runResult, setRunResult] = useState<{
     algorithm: { id: string; name: string; version: number; is_favorite?: boolean };
     run: { id: string };
@@ -176,7 +195,7 @@ export default function TickBacktestView() {
     setRunLoading(true);
     setRunError(null);
     setRunResult(null);
-    setRunProgress("Starting...");
+    setRunProgress({ stage: "start", message: "Starting...", started_at_ms: Date.now() });
     try {
       if (startDate > endDate) {
         throw new Error("Start date must be on or before end date");
@@ -233,7 +252,18 @@ export default function TickBacktestView() {
               const firstTradeDay = days.find((d: DailySummary) => d.num_trades > 0);
               setChartDay(firstTradeDay?.date ?? days[0]?.date ?? null);
             } else {
-              setRunProgress(evt.message);
+              setRunProgress((prev) => ({
+                stage: evt.stage,
+                message: evt.message,
+                total_chunks: evt.total_chunks ?? prev?.total_chunks,
+                cached_chunks: evt.cached_chunks ?? prev?.cached_chunks,
+                fetched_chunks: evt.fetched_chunks ?? prev?.fetched_chunks,
+                remaining_chunks: evt.remaining_chunks ?? prev?.remaining_chunks,
+                current: evt.current ?? prev?.current,
+                started_at_ms: evt.stage === "fetch"
+                  ? (prev?.stage === "fetch" ? prev.started_at_ms : Date.now())
+                  : prev?.started_at_ms,
+              }));
             }
           } catch (e) {
             if (e instanceof SyntaxError) continue;
@@ -531,12 +561,53 @@ export default function TickBacktestView() {
             </div>
           </div>
 
-          {runLoading && (
-            <div className="loading-banner" style={{ margin: "0.5rem 0", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-              <span className="spinner" />
-              <span>{runProgress || "Starting..."}</span>
-            </div>
-          )}
+          {runLoading && (() => {
+            const progress = runProgress;
+            const totalChunks = progress?.total_chunks ?? 0;
+            const cachedChunks = progress?.cached_chunks ?? 0;
+            const fetchedChunks = progress?.fetched_chunks ?? 0;
+            const remainingChunks = progress?.remaining_chunks ?? 0;
+            const missingChunks = Math.max(totalChunks - cachedChunks, 0);
+            const fetchPct = missingChunks > 0
+              ? Math.min(100, (fetchedChunks / missingChunks) * 100)
+              : totalChunks > 0 && cachedChunks === totalChunks
+                ? 100
+                : 0;
+            const elapsedSec = progress?.stage === "fetch" && progress.started_at_ms
+              ? (Date.now() - progress.started_at_ms) / 1000
+              : 0;
+            const etaSec = fetchedChunks > 0 && remainingChunks > 0
+              ? (elapsedSec / fetchedChunks) * remainingChunks
+              : null;
+
+            return (
+              <div className="loading-banner" style={{ margin: "0.5rem 0", display: "flex", flexDirection: "column", alignItems: "stretch", gap: "0.4rem" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <span className="spinner" />
+                  <span>{progress?.message || "Starting..."}</span>
+                </div>
+                {progress?.stage === "fetch" && totalChunks > 0 && (
+                  <>
+                    <div className="progress-bar" style={{ background: "#d4d4d4" }}>
+                      <div className="progress-fill" style={{ width: `${fetchPct}%` }} />
+                    </div>
+                    <div style={{ fontSize: "0.75rem", color: "#444", display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
+                      <span>Total: {totalChunks}</span>
+                      <span>Cached: {cachedChunks}</span>
+                      <span>Fetched: {fetchedChunks}</span>
+                      <span>Remaining: {remainingChunks}</span>
+                      {etaSec != null && <span>ETA: {formatDuration(etaSec)}</span>}
+                    </div>
+                    {progress.current && (
+                      <div style={{ fontSize: "0.72rem", color: "#5a5a5a" }}>
+                        Current chunk: {progress.current}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            );
+          })()}
           {runError && <p className="error-banner">{runError}</p>}
 
           {runResult && (

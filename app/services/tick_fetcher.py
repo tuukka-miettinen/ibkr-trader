@@ -211,6 +211,14 @@ class TickFetcher:
             symbol, total, cached, len(missing_hours),
         )
 
+        if on_progress:
+            on_progress({
+                "total_chunks": total,
+                "fetched_chunks": 0,
+                "cached_chunks": cached,
+                "current": None,
+            })
+
         fetched = 0
         pending_store: asyncio.Task | None = None
         for hour_start in missing_hours:

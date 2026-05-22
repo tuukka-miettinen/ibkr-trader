@@ -159,20 +159,96 @@ async def run_tick_backtest_endpoint(body: RunTickBacktestRequest):
         # Stage 1: Fetch data
         yield _sse({"stage": "fetch", "message": "Fetching data..."})
 
-        fetch_result = await tick_fetcher.fetch_and_store(
-            sym,
-            start_date=body.start_date,
-            end_date=body.end_date,
-            extended=body.extended,
-            on_progress=lambda p: None,  # progress tracked via total/cached
+        fetch_progress_queue: asyncio.Queue = asyncio.Queue()
+
+        def fetch_progress(p: dict):
+            fetch_progress_queue.put_nowait(p)
+
+        fetch_task = asyncio.create_task(
+            tick_fetcher.fetch_and_store(
+                sym,
+                start_date=body.start_date,
+                end_date=body.end_date,
+                extended=body.extended,
+                on_progress=fetch_progress,
+            )
         )
+
+        while not fetch_task.done():
+            try:
+                p = await asyncio.wait_for(fetch_progress_queue.get(), timeout=0.1)
+                total = p.get("total_chunks", 0)
+                cached = p.get("cached_chunks", 0)
+                fetched = p.get("fetched_chunks", 0)
+                remaining = max(total - cached - fetched, 0)
+                current = p.get("current")
+                if total > 0 and cached == total:
+                    message = f"All {total} chunks cached"
+                elif fetched == 0:
+                    message = f"Fetching data... {cached}/{total} chunks already cached"
+                else:
+                    message = (
+                        f"Fetching data... {fetched} fetched, {cached} cached, "
+                        f"{remaining} remaining"
+                    )
+                payload = {
+                    "stage": "fetch",
+                    "message": message,
+                    "total_chunks": total,
+                    "cached_chunks": cached,
+                    "fetched_chunks": fetched,
+                    "remaining_chunks": remaining,
+                }
+                if current:
+                    payload["current"] = current
+                yield _sse(payload)
+            except asyncio.TimeoutError:
+                continue
+
+        fetch_result = await fetch_task
+        while not fetch_progress_queue.empty():
+            p = fetch_progress_queue.get_nowait()
+            total = p.get("total_chunks", 0)
+            cached = p.get("cached_chunks", 0)
+            fetched = p.get("fetched_chunks", 0)
+            remaining = max(total - cached - fetched, 0)
+            payload = {
+                "stage": "fetch",
+                "message": (
+                    f"All {total} chunks cached"
+                    if total > 0 and cached == total
+                    else f"Fetching data... {fetched} fetched, {cached} cached, {remaining} remaining"
+                ),
+                "total_chunks": total,
+                "cached_chunks": cached,
+                "fetched_chunks": fetched,
+                "remaining_chunks": remaining,
+            }
+            if p.get("current"):
+                payload["current"] = p["current"]
+            yield _sse(payload)
+
         cached = fetch_result["cached_chunks"]
         fetched = fetch_result["fetched_chunks"]
         total = fetch_result["total_chunks"]
         if fetched > 0:
-            yield _sse({"stage": "fetch", "message": f"Fetched {fetched} new chunks ({cached} cached, {total} total)"})
+            yield _sse({
+                "stage": "fetch",
+                "message": f"Fetched {fetched} new chunks ({cached} cached, {total} total)",
+                "total_chunks": total,
+                "cached_chunks": cached,
+                "fetched_chunks": fetched,
+                "remaining_chunks": 0,
+            })
         else:
-            yield _sse({"stage": "fetch", "message": f"All {total} chunks cached"})
+            yield _sse({
+                "stage": "fetch",
+                "message": f"All {total} chunks cached",
+                "total_chunks": total,
+                "cached_chunks": cached,
+                "fetched_chunks": 0,
+                "remaining_chunks": 0,
+            })
 
         # Stage 2: Load ticks
         yield _sse({"stage": "load", "message": "Loading ticks..."})

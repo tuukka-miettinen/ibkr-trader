@@ -19,8 +19,6 @@ async def market_socket(websocket: WebSocket) -> None:
     await websocket.accept()
     symbol = "AAPL"
     timeframe = None
-    loop = asyncio.get_event_loop()
-
     try:
         while True:
             try:
@@ -35,9 +33,7 @@ async def market_socket(websocket: WebSocket) -> None:
                 symbol = request.symbol.upper()
                 timeframe = request.timeframe
                 try:
-                    candles = await loop.run_in_executor(
-                        None, candle_service.get_history, symbol, timeframe
-                    )
+                    candles = await candle_service.get_history_async(symbol, timeframe)
                 except MarketDataError as exc:
                     await websocket.send_json({"type": "error", "message": str(exc)})
                     continue
@@ -65,9 +61,7 @@ async def market_socket(websocket: WebSocket) -> None:
                     continue
 
                 try:
-                    candle = await loop.run_in_executor(
-                        None, candle_service.next_candle, symbol, timeframe
-                    )
+                    candle = await candle_service.next_candle_async(symbol, timeframe)
                 except MarketDataError as exc:
                     await websocket.send_json({"type": "error", "message": str(exc)})
                     continue

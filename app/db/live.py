@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
@@ -353,19 +354,28 @@ class LiveRepository:
     ) -> None:
         if not ticks:
             return
-        session.add_all([
-            LiveSessionTick(
-                id=_uuid(),
-                session_symbol_id=session_symbol_id,
-                time=tick.time,
-                open=tick.open,
-                high=tick.high,
-                low=tick.low,
-                close=tick.close,
-                volume=tick.volume,
-            )
-            for tick in ticks
+
+        # IBKR / reconnect flows can occasionally replay the latest 5-second bar.
+        # Deduplicate within the batch first, then ignore rows already persisted.
+        unique_ticks: dict[datetime, Candle] = {}
+        for tick in ticks:
+            unique_ticks[_ensure_utc(tick.time)] = tick
+
+        stmt = insert(LiveSessionTick).values([
+            {
+                "id": _uuid(),
+                "session_symbol_id": session_symbol_id,
+                "time": tick_time,
+                "open": tick.open,
+                "high": tick.high,
+                "low": tick.low,
+                "close": tick.close,
+                "volume": tick.volume,
+            }
+            for tick_time, tick in sorted(unique_ticks.items(), key=lambda item: item[0])
         ])
+        stmt = stmt.on_conflict_do_nothing(index_elements=["session_symbol_id", "time"])
+        await session.execute(stmt)
         await session.commit()
 
     async def get_ticks(

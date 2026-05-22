@@ -38,16 +38,34 @@ export default function App() {
   const [location] = useLocation();
   const socketRef = useRef<WebSocket | null>(null);
 
+  const activeTab = location.startsWith("/paper-trading")
+    ? "paper-trading"
+    : location.startsWith("/tick-backtest")
+      ? "tick-backtest"
+      : "live";
+  const isLiveChartRoute = activeTab === "live";
+
   useEffect(() => {
+    if (!isLiveChartRoute) {
+      return;
+    }
     // Clear chart immediately so the user sees instant visual feedback
     // when symbol or timeframe changes. The WebSocket effect below then
     // reconnects and delivers a fresh snapshot.
     setCandles([]);
     setLoading(true);
     setError(null);
-  }, [symbol, timeframe]);
+  }, [isLiveChartRoute, symbol, timeframe]);
 
   useEffect(() => {
+    if (!isLiveChartRoute) {
+      if (socketRef.current) {
+        socketRef.current.close();
+        socketRef.current = null;
+      }
+      return;
+    }
+
     const socket = new WebSocket(SOCKET_URL);
     socketRef.current = socket;
 
@@ -75,21 +93,30 @@ export default function App() {
         return;
       }
 
-      setError(message.message);
+      if (message.type === "error") {
+        setError(message.message);
+        setLoading(false);
+        return;
+      }
+
+      setError("Unexpected WebSocket message");
+      setLoading(false);
     };
 
     socket.onclose = () => {
       setStatus("Disconnected");
+      setLoading(false);
     };
 
     socket.onerror = () => {
       setError("WebSocket connection failed");
+      setLoading(false);
     };
 
     return () => {
       socket.close();
     };
-  }, [symbol, timeframe]);
+  }, [isLiveChartRoute, symbol, timeframe]);
 
   function handleApplySymbol() {
     const nextSymbol = symbolInput.trim().toUpperCase();
@@ -100,12 +127,6 @@ export default function App() {
     // and tears down + re-opens the WebSocket with the new symbol.
     setSymbol(nextSymbol);
   }
-
-  const activeTab = location.startsWith("/paper-trading")
-    ? "paper-trading"
-    : location.startsWith("/tick-backtest")
-      ? "tick-backtest"
-      : "live";
 
   return (
     <main className="page-shell">

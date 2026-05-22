@@ -26,7 +26,7 @@ _ib: IB | None = None
 _executor: ThreadPoolExecutor | None = None
 _executor_thread_id: int | None = None
 _connected = False
-_market_data_mode = "realtime"
+_market_data_mode = "delayed"
 
 
 def _get_config() -> tuple[str, int, int]:
@@ -95,7 +95,7 @@ def ensure_connected() -> None:
 
     Must be called from the IB executor thread (via run_on_ib_thread).
     """
-    global _connected
+    global _connected, _market_data_mode
     ib = get_ib()
     if ib.isConnected():
         _connected = True
@@ -110,10 +110,15 @@ def ensure_connected() -> None:
         )
 
     ib.connect(host, port, clientId=client_id, readonly=False, timeout=10)
+    # Match the older behavior: when no live session has explicitly requested
+    # a mode yet, use delayed data so passive chart/history pages load from the
+    # free delayed feed instead of waiting on real-time permissions/service.
+    ib.reqMarketDataType(3)
+    _market_data_mode = "delayed"
     _connected = True
     logger.info(
-        "IBKR shared connection established (client_id=%s, host=%s, port=%s)",
-        client_id, host, port,
+        "IBKR shared connection established (client_id=%s, host=%s, port=%s, market_data_mode=%s)",
+        client_id, host, port, _market_data_mode,
     )
 
 
@@ -166,5 +171,5 @@ def shutdown() -> None:
 
     _executor_thread_id = None
     _connected = False
-    _market_data_mode = "realtime"
+    _market_data_mode = "delayed"
     _ib = None
